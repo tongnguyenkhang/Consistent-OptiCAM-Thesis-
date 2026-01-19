@@ -1,0 +1,2 @@
+----TASK TO DO----
+1. Masks đang giống nhau? Đảm bảo Decomposition? Cần sửa (đang đợi thầy confirm)

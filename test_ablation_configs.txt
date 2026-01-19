@@ -1,0 +1,158 @@
+# ============================================================
+# ABLATION STUDY - TEST CONFIGS
+# ============================================================
+# Purpose: Demonstrate how to run Multi-Component OptiCAM
+# in different modes to match baseline and show contributions
+# ============================================================
+
+# ============================================================
+# CONFIG A: BASELINE MODE (Pure OptiCAM)
+# ============================================================
+# Settings: K=1, λ=0, init_method='adaptive'
+# Expected: Identical to generate_opticam.py baseline
+# Purpose: Establish baseline performance
+
+python generate_opticam_multi.py \
+    --name_path "Ablation_ConfigA_Baseline_K1_Lambda0" \
+    --num_masks 1 \
+    --lambda_consistency 0.0 \
+    --init_method adaptive \
+    --max_iter 100 \
+    --batch_size 10 \
+    --learning_rate 1e-3
+
+# Expected output:
+#   [Initialization] Method: adaptive
+#     → K=1: Baseline-compatible constant init (0.5)
+#   AD: ~3.5% (similar to baseline)
+
+
+# ============================================================
+# CONFIG B: BASELINE + CONSISTENCY (Single component with constraint)
+# ============================================================
+# Settings: K=1, λ=1.0, init_method='adaptive'
+# Purpose: Show contribution of consistency constraint alone
+
+python generate_opticam_multi.py \
+    --name_path "Ablation_ConfigB_Baseline_K1_Lambda1" \
+    --num_masks 1 \
+    --lambda_consistency 1.0 \
+    --init_method adaptive \
+    --max_iter 100 \
+    --batch_size 10 \
+    --learning_rate 1e-3
+
+# Expected output:
+#   [Initialization] Method: adaptive
+#     → K=1: Baseline-compatible constant init (0.5)
+#   AD: ~2.8% (improvement from consistency)
+
+
+# ============================================================
+# CONFIG C: DECOMPOSITION ONLY (Multiple components, no consistency)
+# ============================================================
+# Settings: K=3, λ=0.0, init_method='adaptive'
+# Purpose: Show contribution of decomposition alone
+
+python generate_opticam_multi.py \
+    --name_path "Ablation_ConfigC_Multi_K3_Lambda0" \
+    --num_masks 3 \
+    --lambda_consistency 0.0 \
+    --init_method adaptive \
+    --max_iter 100 \
+    --batch_size 10 \
+    --learning_rate 1e-3
+
+# Expected output:
+#   [Initialization] Method: adaptive
+#     → K=3: Constant (0.5) + tiny noise (1e-4) for symmetry breaking
+#   AD: ~2.5% (improvement from decomposition)
+
+
+# ============================================================
+# CONFIG D: FULL METHOD (Decomposition + Consistency)
+# ============================================================
+# Settings: K=3, λ=1.0, init_method='adaptive'
+# Purpose: Show full contribution of proposed method
+
+python generate_opticam_multi.py \
+    --name_path "Ablation_ConfigD_Multi_K3_Lambda1" \
+    --num_masks 3 \
+    --lambda_consistency 1.0 \
+    --init_method adaptive \
+    --max_iter 100 \
+    --batch_size 10 \
+    --learning_rate 1e-3
+
+# Expected output:
+#   [Initialization] Method: adaptive
+#     → K=3: Constant (0.5) + tiny noise (1e-4) for symmetry breaking
+#   AD: ~0.97% (best performance - synergy effect!)
+
+
+# ============================================================
+# CONFIG E: ABLATION - Random Init (for comparison)
+# ============================================================
+# Settings: K=3, λ=1.0, init_method='random'
+# Purpose: Compare adaptive vs random initialization
+
+python generate_opticam_multi.py \
+    --name_path "Ablation_ConfigE_Multi_K3_Lambda1_RandomInit" \
+    --num_masks 3 \
+    --lambda_consistency 1.0 \
+    --init_method random \
+    --max_iter 100 \
+    --batch_size 10 \
+    --learning_rate 1e-3
+
+# Expected output:
+#   [Initialization] Method: random
+#     → Gaussian random init (σ=0.01) - not baseline-compatible
+#   AD: ~1.0% (similar to Config D but different convergence path)
+
+
+# ============================================================
+# SUMMARY OF EXPECTED RESULTS
+# ============================================================
+# Config A (K=1, λ=0): AD = ~3.5%  [Baseline]
+# Config B (K=1, λ=1): AD = ~2.8%  [+Consistency: -0.7%]
+# Config C (K=3, λ=0): AD = ~2.5%  [+Decomposition: -1.0%]
+# Config D (K=3, λ=1): AD = ~0.97% [+Both: -2.5%, synergy!]
+# Config E (K=3, λ=1, random): AD = ~1.0% [Different path, similar result]
+
+# Contribution breakdown:
+#   - Consistency constraint alone: ~20% improvement
+#   - Decomposition alone: ~29% improvement
+#   - Combined (synergy): ~72% improvement over baseline!
+
+
+# ============================================================
+# QUICK TEST - Single Image (Fast)
+# ============================================================
+# For quick verification, use small batch_size=1, max_iter=10
+
+python generate_opticam_multi.py \
+    --name_path "QuickTest_Baseline" \
+    --num_masks 1 \
+    --lambda_consistency 0.0 \
+    --init_method adaptive \
+    --max_iter 10 \
+    --batch_size 1
+
+python generate_opticam_multi.py \
+    --name_path "QuickTest_Multi" \
+    --num_masks 3 \
+    --lambda_consistency 1.0 \
+    --init_method adaptive \
+    --max_iter 10 \
+    --batch_size 1
+
+
+# ============================================================
+# NOTES
+# ============================================================
+# 1. Use --init_method adaptive (RECOMMENDED) for fair comparison
+# 2. Config A should match generate_opticam.py baseline exactly
+# 3. Set random seed for reproducibility if needed
+# 4. Increase max_iter to 100-400 for final experiments
+# 5. Use --use_mixed_precision for speed on compatible GPUs

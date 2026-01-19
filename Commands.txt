@@ -1,0 +1,1279 @@
+================================================================================
+HƯỚNG DẪN SỬ DỤNG OPTICAM & MULTI-COMPONENT OPTICAM
+================================================================================
+Cập nhật: December 2025
+Version: 2.0 (with adaptive initialization, consistency constraint, checkpointing)
+
+MỤC LỤC:
+1. Tổng quan hai scripts
+2. generate_opticam.py (Baseline OptiCAM - Single Mask)
+3. generate_opticam_multi.py (Multi-Component OptiCAM - K Masks)
+4. Tools: Plotting và Analysis
+5. Metrics và Loss Functions
+6. Checkpointing và Resume
+7. Config Examples cho Ablation Study
+8. Troubleshooting
+
+================================================================================
+1. TỔNG QUAN HAI SCRIPTS
+================================================================================
+
+**generate_opticam.py** (Baseline OptiCAM):
+  - Tạo 1 mask duy nhất cho mỗi ảnh
+  - Optimization objectives: 
+    * "mask": Maximize confidence (logit/prob space)
+    * "diff": Minimize difference (preserve confidence)
+  - Không có consistency constraint
+  - Faster, simpler baseline
+
+**generate_opticam_multi.py** (Multi-Component OptiCAM):
+  - Tạo K masks (K components) cho mỗi ảnh  
+  - K masks decompose 2048 channels thành K tổ hợp tuyến tính
+  - Consistency constraint: Σ(β_k * c_k) ≈ c_original
+  - Supports: lambda scheduling, mixed precision, adaptive init
+  - Checkpointing: Resume từ batch bất kỳ
+
+**Quan hệ giữa Baseline và Multi:**
+  - Multi với K=1 + init_method="constant" = Baseline compatible
+  - Multi extends Baseline với K>1 components và consistency constraint
+
+================================================================================
+2. GENERATE_OPTICAM.PY (BASELINE OPTICAM)
+================================================================================
+
+2.1. CÁC FLAGS CHÍNH
+---------------------------------
+
+### Core Parameters
+
+--max_iter <int>              (default: 10)
+  Số iterations cho optimizer mỗi ảnh. Tăng lên cho convergence tốt hơn.
+  Khuyến nghị: 50-100 iterations cho kết quả ổn định.
+
+--learning_rate <float>       (default: 1e-6)
+  Learning rate cho Adam optimizer.
+  Khuyến nghị: 1e-3 đến 1e-4 (1e-6 quá nhỏ, convergence rất chậm).
+
+--batch_size <int>            (default: 10)
+  Số ảnh process mỗi batch.
+  Lưu ý: Mỗi ảnh optimize độc lập, batch chỉ ảnh hưởng checkpoint frequency.
+
+--name_path <string>          (default: "OptiCam")
+  Tên thư mục kết quả: ./results/<name_path>/
+  Nên đặt tên mô tả config: "Baseline_Maximize_Logit", "Baseline_Preserve_Prob"
+
+### Objective Functions
+
+--objective <string>          (default: "mask")
+  Chọn objective function:
+  
+  * "mask": MAXIMIZE confidence (Eq 10 in paper)
+    - Optimize: max f(x ⊙ mask) 
+    - Tìm vùng ảnh QUAN TRỌNG NHẤT (cao điểm nhất)
+    - Paper default, tương thích với GradCAM/ScoreCAM
+    
+  * "diff": MINIMIZE difference (Eq 19, preserve confidence)
+    - Optimize: min |f(x) - f(x ⊙ mask)|
+    - Giữ confidence GẦN BẰNG original (fidelity)
+    - Inspiration cho Multi-Component consistency
+
+--use_logit                   (flag, default: False)
+  Nếu bật: optimize trong LOGIT space (raw scores, unbounded).
+  Nếu tắt: optimize trong PROBABILITY space [0,1] (post-softmax).
+  
+  Khuyến nghị:
+  - Logit space: Paper default, numerically stable với large scores
+  - Prob space: Intuitive, compatible với Multi-Component
+
+--canonical_loss <string>     (default: "abs")
+  Loss type khi objective="diff" (không ảnh hưởng objective="mask"):
+  
+  * "abs": |s_orig - s_masked|           - L1 distance
+  * "rel": |s_orig - s_masked| / |s_orig| - Relative error (% difference)
+  * "mse": (s_orig - s_masked)²          - L2 distance (squared)
+  * "all": Save histories cho cả 3 (default optimize với "abs")
+  
+  Lưu ý: Phải dùng CÙNG canonical_loss khi so sánh Baseline vs Multi!
+
+### Normalization
+
+--name_norm <string>          (default: "max_min")
+  Normalization cho saliency map → mask [0,1]:
+  
+  * "max_min": (x - min) / (max - min)      - Min-max normalization
+  * "sigmoid": 1 / (1 + exp(-x))            - Sigmoid (smooth)
+  * "max": x / max(x)                        - Max normalization
+
+### Filtering
+
+--min_orig <float>            (default: 0.05)
+  Chỉ tính metrics cho ảnh có original confidence ≥ threshold.
+  Tránh unreliable metrics từ low-confidence predictions.
+
+--only_correct                (flag, default: False)
+  Nếu bật: chỉ process ảnh được classify đúng (pred == true label).
+
+### Output Control
+
+--save_loss_plot              (flag, default: False)
+  Bật: vẽ PNG plots trực tiếp (tốn CPU, chỉ dùng khi ít ảnh).
+  Khuyến nghị: tắt flag này, chỉ lưu .npy, sau đó dùng plot_from_npy.py.
+
+--save_loss_npy               (flag, default: True)
+  Lưu loss histories dưới dạng .npy files (mặc định BẬT).
+  Per-image: ./results/<name>/plot/<image>_Loss.npy
+
+--no_save_loss_npy            (flag)
+  Override để TẮT việc lưu .npy (dùng khi chỉ cần PNG trực tiếp).
+
+### Advanced Metrics
+
+--am_enable_ins_auc           (flag, default: True)
+  Bật AUC Insertion metric (từ baseline → thêm dần vùng quan trọng).
+
+--am_enable_del_auc           (flag, default: True)
+  Bật AUC Deletion metric (từ original → xóa dần vùng quan trọng).
+
+--am_enable_aopc_ins          (flag, default: True)
+  Bật AOPC Insertion metric (area over perturbation curve - insertion).
+
+--am_enable_aopc_del          (flag, default: True)
+  Bật AOPC Deletion metric (area over perturbation curve - deletion).
+
+Giải thích Insertion/Deletion:
+  - Baseline="black": đặt vùng bị che về đen (0 values)
+  - Baseline="blur": thay vùng bị che bằng Gaussian blur (tự nhiên hơn)
+  - Config trong tools/compute_metrics.py: ID_BASELINE, ID_STEPS, ID_BLUR_KSIZE
+
+### Checkpointing (Experimental)
+
+--resume_checkpoint <path>    (default: "")
+  Path đến checkpoint file để resume (hiếm dùng với Baseline).
+
+--start_batch <int>           (default: 0)
+  Batch index để bắt đầu (khi resume).
+
+### Early Stopping
+
+--delta_change_threshold <float> (default: 0)
+  Nếu > 0: early stop khi |loss[t] - loss[t-1]| < threshold.
+  Khuyến nghị: 0 (disable) hoặc 1e-5 (very conservative).
+
+--save_best_weights           (flag, default: False)
+  Lưu best weights snapshot per batch (experimental).
+
+---------------------------------
+2.2. CÂU LỆNH MẪU (BASELINE)
+---------------------------------
+
+### Cấu hình phổ biến (50 iterations, lr=1e-3):
+```powershell
+# Maximize trong Logit space (Paper default)
+python generate_opticam.py \
+    --name_path "Baseline_Maximize_Logit" \
+    --objective mask --use_logit \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+
+# Maximize trong Prob space
+python generate_opticam.py \
+    --name_path "Baseline_Maximize_Prob" \
+    --objective mask \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+
+# Preserve confidence (fidelity objective)
+python generate_opticam.py \
+    --name_path "Baseline_Preserve_Prob" \
+    --objective diff --canonical_loss abs \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+
+### Tắt advanced metrics (nhanh hơn):
+```powershell
+python generate_opticam.py \
+    --name_path "Baseline_Fast" \
+    --objective mask \
+    --max_iter 20 --batch_size 10 --learning_rate 1e-3 \
+    --am_disable_ins_auc --am_disable_del_auc \
+    --am_disable_aopc_ins --am_disable_aopc_del
+```
+
+### Chỉ ảnh correct predictions:
+```powershell
+python generate_opticam.py \
+    --name_path "Baseline_Correct_Only" \
+    --objective mask --only_correct \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+
+================================================================================
+3. GENERATE_OPTICAM_MULTI.PY (MULTI-COMPONENT OPTICAM)
+================================================================================
+
+3.1. CÁC FLAGS CHÍNH
+---------------------------------
+
+### Core Parameters
+
+--max_iter <int>              (default: 10)
+  Số iterations cho optimizer (mỗi ảnh). Tăng cho convergence tốt hơn.
+  Khuyến nghị: 50-100 iterations.
+
+--learning_rate <float>       (default: 1e-6)
+  Learning rate cho Adam optimizer.
+  Khuyến nghị: 1e-3 đến 1e-4 (1e-6 quá chậm).
+
+--batch_size <int>            (default: 10)
+  Số ảnh process mỗi batch. Ảnh hưởng checkpoint frequency.
+
+--name_path <string>          (default: "OptiCamMulti_PureProb")
+  Tên thư mục kết quả: ./results/<name_path>/
+
+--num_masks <int>             (default: 3)
+  Số components K. Mỗi component = 1 tổ hợp tuyến tính của 2048 channels.
+  
+  **QUAN TRỌNG:**
+  - K=1: Tương đương Baseline (nếu init_method="constant")
+  - K=3: Standard multi-component (cân bằng giữa diversity và tính toán)
+  - K>5: Nhiều components hơn, nhưng chậm hơn và risk overfitting
+  
+  **LƯU Ý:** num_masks = K components, KHÔNG PHẢI 2048 channels!
+
+### Consistency Constraint (NEW!)
+
+--lambda_consistency <float>  (default: 1.0)
+  Trọng số λ cho consistency constraint loss.
+  
+  Loss = L_fidelity + λ * L_consistency
+  L_consistency = (Σ(β_k * c_k) - c_original)²
+  
+  Ý nghĩa:
+  - λ=0: Không enforce consistency (chỉ fidelity)
+  - λ=1.0: Standard enforcement (balanced)
+  - λ>1: Stronger consistency (có thể sacrifice fidelity)
+  
+  **Kết quả thực nghiệm:**
+  - Với K=3, ResNet50 có tính "quasi-linear" với masked inputs
+  - → Fidelity loss tự động enforce consistency phần lớn
+  - → λ=1.0 đủ, λ>5 không cải thiện nhiều
+
+--use_lambda_scheduling       (flag, default: False)
+  Bật adaptive lambda scheduling: λ thay đổi tuyến tính theo iterations.
+  
+  λ(t) = λ_start + (λ_end - λ_start) * (t / max_iter)
+  
+  Ý nghĩa:
+  - Early iterations: λ cao → enforce consistency mạnh
+  - Later iterations: λ thấp → focus vào fidelity (fine-tune)
+
+--lambda_start <float>        (default: 0.1)
+  λ ban đầu (khi use_lambda_scheduling=True).
+
+--lambda_end <float>          (default: 0.3)
+  λ cuối cùng (khi use_lambda_scheduling=True).
+
+### Initialization Strategy (NEW!)
+
+--init_method <string>        (default: "adaptive")
+  Chiến lược khởi tạo weights W_raw cho K components:
+  
+  * "adaptive": KHUYẾN NGHỊ
+    - K=1: constant (0.5) → baseline-compatible
+    - K>1: constant + tiny noise (1e-4) → breaks symmetry
+    - Best of both worlds: reproducible khi K=1, diverse khi K>1
+  
+  * "random": Random Gaussian N(0, 0.01)
+    - Breaks symmetry mạnh, nhưng không baseline-compatible
+    - Kết quả K=1 khác Baseline
+  
+  * "constant": Pure constant (0.5)
+    - ⚠️ WARNING: Với K>1, tất cả components giống nhau (symmetry problem)!
+    - Chỉ dùng khi K=1 (giống Baseline)
+  
+  **Tại sao cần breaks symmetry?**
+  Nếu tất cả W_raw khởi tạo giống hệt nhau → K components học giống nhau
+  → Vô nghĩa, không decompose được!
+
+### Mask Scaling
+
+--mask_scaling                (flag, default: True)
+  Cách áp dụng learned beta weights (β_k):
+  
+  * True (MẶC ĐỊNH):
+    - Nhân β_k VÀO mask trước khi mask lên ảnh
+    - c_k = model(β_k * mask_k ⊙ x)
+    - Consistency: Σ(β_k * c_k) ≈ c_original
+    - Combined mask: Σ(β_k * mask_k)
+  
+  * False (--no_mask_scaling):
+    - Tính c_k riêng: c_k = model(mask_k ⊙ x)
+    - Nhân β_k vào SCORE sau forward
+    - Weighted sum: Σ(β_k * c_k)
+  
+  **Khuyến nghị:** Giữ default (True) cho consistency với theory.
+
+--no_mask_scaling             (flag)
+  Override để tắt mask_scaling.
+
+### Optimization & Performance
+
+--use_logit                   (flag, default: False)
+  Optimize trong logit space (raw scores) thay vì probability space.
+  
+  **LƯU Ý:** Multi-Component thiết kế cho PROBABILITY space.
+  Logit space có thể gây numerical issues với consistency constraint.
+  Khuyến nghị: TẮT flag này (dùng prob space).
+
+--use_mixed_precision         (flag, default: False)
+  Bật FP16 mixed precision training (CUDA only).
+  
+  Ưu điểm:
+  - Giảm 30-40% memory usage
+  - Tăng 20-30% speed (GPU hỗ trợ Tensor Cores)
+  
+  Nhược điểm:
+  - Numerical precision giảm (negligible với OptiCAM)
+  - Chỉ hoạt động trên CUDA
+
+--max_batch_size <int>        (default: None - auto-detect)
+  Giới hạn batch size cho batched forward pass optimization.
+  
+  Auto-detect dựa trên GPU memory:
+  - 4GB GPU → 40
+  - 8GB GPU → 60
+  - 11GB GPU → 80 (RTX 2080 Ti)
+  - 16GB+ GPU → 120+
+  
+  Set 0 để disable batching (sequential forwards - chậm hơn ~75%).
+
+### Normalization & Filtering
+
+--name_norm <string>          (default: "max_min")
+  Normalization: "max_min", "sigmoid", "max" (giống Baseline).
+
+--min_orig <float>            (default: 0.05)
+  Threshold cho original confidence (giống Baseline).
+
+--only_correct                (flag, default: False)
+  Chỉ process ảnh correct predictions (giống Baseline).
+
+### Component Evaluation
+
+--eval_reduce <string>        (default: "combined")
+  Cách tính reduced score cho metrics:
+  
+  * "combined": Dùng combined mask Σ(β_k * mask_k) (KHUYẾN NGHỊ)
+  * "avg": Average của K component scores
+  * "sum": Sum của K component scores (không normalize)
+
+--combine_rule <string>       (default: "max")
+  Rule để combine K masks cho visualization:
+  
+  * "max": max(mask_1, mask_2, ..., mask_K) - pixel-wise max
+  * "prob_or": Probabilistic OR
+  * "weighted": Weighted sum Σ(β_k * mask_k)
+
+--weighted_temp <float>       (default: 1.0)
+  Temperature cho weighted combination.
+
+### Visualization
+
+--viz_from_combined           (flag, default: False)
+  Visualize từ combined mask thay vì individual components.
+
+--comp_viz_mode <string>      (default: "importance")
+  Visualization mode cho components:
+  
+  * "raw": Raw masks
+  * "importance": Scale by beta weights
+  * "combined_clip": Combined with clipping
+
+--min_comp_share <float>      (default: 0.05)
+  Min threshold cho component visualization.
+
+### Output Control (giống Baseline)
+
+--save_loss_plot              (flag, default: False)
+--save_loss_npy               (flag, default: True)
+--no_save_loss_npy            (flag)
+
+### Advanced Metrics (giống Baseline)
+
+--am_enable_ins_auc           (flag, default: True)
+--am_enable_del_auc           (flag, default: True)
+--am_enable_aopc_ins          (flag, default: True)
+--am_enable_aopc_del          (flag, default: True)
+--am_disable_ins_auc          (flag)
+--am_disable_del_auc          (flag)
+--am_disable_aopc_ins         (flag)
+--am_disable_aopc_del         (flag)
+--no_adv_metrics              (flag) - Tắt tất cả advanced metrics
+
+### Monitoring
+
+--monitoring_metric <string>  (default: "mse")
+  Metric cho monitoring (không ảnh hưởng optimization):
+  "abs", "rel", "mse", hoặc "all".
+
+--dbg_recon                   (flag, default: False)
+  Debug mode: in thông tin reconstruction chi tiết.
+
+### Checkpointing (QUAN TRỌNG!)
+
+--resume_checkpoint <path>    (default: "")
+  Path đến checkpoint file để resume.
+  
+  Checkpoint tự động lưu mỗi 10 batches:
+  ./results/<name>/checkpoints/checkpoint_batch_<idx>.pt
+  
+  Resume example:
+  python generate_opticam_multi.py \
+      --resume_checkpoint "results/OptiCamMulti/checkpoints/checkpoint_batch_60.pt"
+
+--start_batch <int>           (default: 0)
+  Batch index để bắt đầu (override auto-detect từ checkpoint).
+  
+  Dùng khi muốn skip batches đầu hoặc chỉ process subset:
+  --start_batch 50  # Bắt đầu từ batch 50
+
+**Checkpoint mechanism:**
+  - Tự động lưu state mỗi 10 batches
+  - State bao gồm: metrics, loss histories, per-image data, batch index
+  - Resume seamless: script tự động phát hiện batch đã xử lý
+  - Safe: không ghi đè data cũ, chỉ append mới
+
+---------------------------------
+3.2. CÂU LỆNH MẪU (MULTI-COMPONENT)
+---------------------------------
+
+### Standard config (K=3, λ=1.0, adaptive init):
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Multi_Standard_K3" \
+    --num_masks 3 --lambda_consistency 1.0 \
+    --init_method adaptive \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3 \
+    --mask_scaling
+```
+
+### With lambda scheduling (adaptive λ):
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Multi_LambdaSchedule_K3" \
+    --num_masks 3 \
+    --use_lambda_scheduling --lambda_start 1.0 --lambda_end 0.3 \
+    --init_method adaptive \
+    --max_iter 100 --batch_size 10 --learning_rate 1e-3 \
+    --use_mixed_precision
+```
+
+### K=1 mode (baseline-compatible):
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Multi_K1_Baseline" \
+    --num_masks 1 --lambda_consistency 0.0 \
+    --init_method constant \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+
+### High K (K=5 for more components):
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Multi_K5_HighDecomp" \
+    --num_masks 5 --lambda_consistency 1.0 \
+    --init_method adaptive \
+    --max_iter 100 --batch_size 5 --learning_rate 1e-3 \
+    --use_mixed_precision
+```
+
+### Resume từ checkpoint:
+```powershell
+# Chạy lần đầu (stop giữa chừng)
+python generate_opticam_multi.py \
+    --name_path "Multi_Resume_Test" \
+    --num_masks 3 --max_iter 100 --batch_size 10
+
+# Resume từ batch 60
+python generate_opticam_multi.py \
+    --name_path "Multi_Resume_Test" \
+    --num_masks 3 --max_iter 100 --batch_size 10 \
+    --resume_checkpoint "results/Multi_Resume_Test/checkpoints/checkpoint_batch_60.pt"
+```
+
+### No consistency (ablation):
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Multi_NoConsistency_K3" \
+    --num_masks 3 --lambda_consistency 0.0 \
+    --init_method adaptive \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+
+### Fast config (disable advanced metrics):
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Multi_Fast_K3" \
+    --num_masks 3 --lambda_consistency 1.0 \
+    --max_iter 20 --batch_size 10 --learning_rate 1e-3 \
+    --no_adv_metrics
+```
+
+================================================================================
+4. TOOLS: PLOTTING VÀ ANALYSIS
+================================================================================
+
+4.1. PLOT_FROM_NPY.PY (OFFLINE PLOTTING)
+---------------------------------
+
+**Mục đích:** Tạo plots từ .npy files đã lưu (không cần rerun training).
+
+**Baseline OptiCAM:**
+```powershell
+python tools/plot_from_npy.py --results_dir "results/Baseline_Maximize_Logit"
+```
+
+Kết quả:
+  - Per-image plots: results/<name>/plot/<image>_loss.png
+  - Aggregated plots: results/<name>/metrics/<loss_type>_loss_batch.png
+                      results/<name>/metrics/<loss_type>_loss_iteration.png
+
+**Multi-Component OptiCAM:**
+```powershell
+python tools/plot_from_npy.py --results_dir "results/Multi_Standard_K3"
+```
+
+Kết quả:
+  - Per-image plots: results/<name>/plot/<image>_<Component>_Loss.png
+  - 5-panel analysis: results/<name>/metrics/component_losses_analysis.png
+    (Total, Fidelity, Consistency, Lambda, Violation)
+  - Per-component plots: results/<name>/metrics/<component>/<component>_loss_batch.png
+                        results/<name>/metrics/<component>/<component>_loss_iteration.png
+
+**Skip per-image plots (chỉ aggregate):**
+```powershell
+python tools/plot_from_npy.py --results_dir "results/Multi_Standard_K3" --skip_per_image
+```
+
+---------------------------------
+4.2. ANALYZE_BETA_WEIGHTS.PY
+---------------------------------
+
+**Mục đích:** Phân tích learned beta weights (β_k) từ Multi-Component results.
+
+**Single config analysis:**
+```powershell
+python tools/analyze_beta_weights.py --results_dir "results/Multi_Standard_K3"
+```
+
+Output:
+  - Statistics: Mean, std, min, max per component
+  - Deviation from uniform (1/K)
+  - Beta evolution plot: results/<name>/metrics/beta_weights_evolution.png
+  - Beta distribution plot: results/<name>/metrics/beta_weights_distribution.png
+
+**Compare 2 configs:**
+```powershell
+python tools/analyze_beta_weights.py \
+    --results_dir "results/Multi_NoConsistency_K3" \
+    --compare "results/Multi_Standard_K3"
+```
+
+Output: Side-by-side comparison of beta statistics.
+
+---------------------------------
+4.3. TEST_LINEARITY_ASSUMPTION.PY (QUICK TEST)
+---------------------------------
+
+**Mục đích:** Test xem model có "quasi-linear" với masked inputs không.
+
+**Quick test:**
+```powershell
+python quick_linearity_test.py
+```
+
+Hardcoded paths cho Config C và D. Kết quả:
+  - Linearity error: |c_combined - Σ(β_k * c_k)|
+  - Interpretation: Strong/Moderate/Weak linearity
+
+---------------------------------
+4.4. COMPUTE_COMP_SUFF.PY (COMPREHENSIVENESS & SUFFICIENCY)
+---------------------------------
+
+**Mục đích:** Compute comp/suff metrics (insertion/deletion curves).
+
+```powershell
+python tools/compute_comp_suff.py \
+    --results_dir "results/Multi_Standard_K3" \
+    --images_dir "images" \
+    --device "cuda"
+```
+
+Lưu ý: Metric này đã được tích hợp trong main scripts với flags:
+  --am_enable_ins_auc, --am_enable_del_auc, --am_enable_aopc_ins, --am_enable_aopc_del
+
+================================================================================
+5. METRICS VÀ LOSS FUNCTIONS
+================================================================================
+
+5.1. PRIMARY METRICS (PAPER EQUATIONS 13-15)
+---------------------------------
+
+**Average Drop (AD) - Equation 13:**
+```
+AD = max(0, (Y_orig - O_masked) / Y_orig) * 100%
+```
+Ý nghĩa: Confidence giảm bao nhiêu % sau khi mask?
+- Càng NHỎ càng TỐT (mask preserve confidence)
+- AD = 0%: Perfect preservation
+- AD > 50%: Mask làm mất quá nhiều information
+
+**Average Increase (AI) - Equation 14:**
+```
+AI = 1 nếu O_masked > Y_orig, else 0
+Count: số ảnh có increase
+```
+Ý nghĩa: Mask có làm TĂNG confidence không? (unexpected)
+- Càng ÍT càng TỐT
+- AI = 0%: No spurious increases
+- AI > 20%: Mask artifacts or over-optimization
+
+**Average Gain (AG) - Equation 15:**
+```
+AG = (Insertion_AUC - Deletion_AUC) / Insertion_AUC * 100%
+```
+Ý nghĩa: Saliency map quality (insertion vs deletion).
+- Càng CAO càng TỐT
+- AG > 20%: Good saliency
+- AG < 10%: Poor saliency
+
+---------------------------------
+5.2. ADVANCED METRICS
+---------------------------------
+
+**AUC Insertion:**
+Diện tích dưới curve khi "thêm dần" vùng quan trọng lên baseline.
+- Start: Baseline image (black/blur)
+- Process: Thêm pixels theo ranking saliency
+- Measure: Confidence tăng như thế nào?
+- Càng CAO càng TỐT (vùng được chọn quan trọng)
+
+**AUC Deletion:**
+Diện tích dưới curve khi "xóa dần" vùng quan trọng.
+- Start: Original image
+- Process: Xóa pixels theo ranking saliency (thay bằng baseline)
+- Measure: Confidence giảm như thế nào?
+- Càng THẤP càng TỐT (vùng được chọn quan trọng)
+
+**AOPC (Area Over Perturbation Curve):**
+Normalization của AUC metrics.
+- AOPC Insertion: Normalized AUC Insertion
+- AOPC Deletion: Normalized AUC Deletion
+
+**Baseline modes:**
+- "black": Đặt vùng che về 0 (đen) - nhanh, đơn giản
+- "blur": Gaussian blur (kernel size 11) - tự nhiên hơn, ổn định hơn
+
+Config: ID_STEPS=70, ID_BASELINE="blur", ID_BLUR_KSIZE=11
+(Trong tools/compute_metrics.py)
+
+---------------------------------
+5.3. CONSISTENCY CONSTRAINT (MULTI ONLY)
+---------------------------------
+
+**Consistency Error:**
+```
+cons_err = |Σ(β_k * c_k) - c_original|
+```
+Ý nghĩa: K components có tái tạo lại confidence original không?
+
+**Consistency Accuracy:**
+```
+accuracy = 1 - (cons_err / c_original)
+```
+- 99.9% accuracy: Excellent consistency
+- 95-99% accuracy: Good consistency
+- < 95% accuracy: Poor consistency
+
+**Consistency Loss (Training):**
+```
+L_consistency = (Σ(β_k * c_k) - c_original)² 
+Total Loss = L_fidelity + λ * L_consistency
+```
+
+**Kết quả thực nghiệm:**
+- K=3, λ=1.0: ~99.9% accuracy (ResNet50 quasi-linear)
+- Fidelity loss tự động enforce consistency (phần lớn)
+- Lambda scheduling giúp cải thiện ~0.1-0.2%
+
+---------------------------------
+5.4. LOSS FUNCTIONS (BASELINE)
+---------------------------------
+
+**Objective="mask" (Maximize):**
+```python
+if use_logit:
+    loss = -logit_masked  # Maximize logit
+else:
+    loss = -prob_masked   # Maximize probability
+```
+
+**Objective="diff" (Preserve):**
+```python
+if canonical_loss == "abs":
+    loss = |score_orig - score_masked|
+elif canonical_loss == "rel":
+    loss = |score_orig - score_masked| / (|score_orig| + eps)
+elif canonical_loss == "mse":
+    loss = (score_orig - score_masked)²
+```
+
+---------------------------------
+5.5. LOSS FUNCTIONS (MULTI-COMPONENT)
+---------------------------------
+
+**Fidelity Loss:**
+```python
+L_fidelity = (c_combined - c_original)²
+# c_combined = model(x ⊙ combined_mask)
+# combined_mask = Σ(β_k * mask_k)
+```
+
+**Consistency Loss:**
+```python
+sum_component_probs = Σ(β_k * c_k)  # if mask_scaling=True
+constraint_violation = sum_component_probs - c_original
+L_consistency = constraint_violation²
+```
+
+**Total Loss:**
+```python
+λ_t = current_lambda  # Adaptive if scheduling enabled
+Loss = L_fidelity + λ_t * L_consistency
+```
+
+**Lambda Scheduling:**
+```python
+if use_lambda_scheduling:
+    progress = step / max_iter
+    λ_t = λ_start + (λ_end - λ_start) * progress
+else:
+    λ_t = λ_consistency
+```
+
+================================================================================
+6. CHECKPOINTING VÀ RESUME
+================================================================================
+
+6.1. TỰ ĐỘNG CHECKPOINTING (MULTI-COMPONENT)
+---------------------------------
+
+**Tần suất:** Mỗi 10 batches và batch cuối cùng.
+
+**Checkpoint location:**
+```
+./results/<name_path>/checkpoints/checkpoint_batch_<idx>.pt
+```
+
+**State được lưu:**
+- batch_idx: Batch index hiện tại
+- raw_samples, counted_samples: Số ảnh đã xử lý
+- sum_ad, sum_ai, sum_ag: Accumulated metrics
+- per_image_rows: Chi tiết mỗi ảnh
+- total_saliency_time, total_wall_time: Timing
+- cons_err_accum, cons_n: Consistency stats
+- sum_auc_ins, sum_auc_del, sum_aopc_ins, sum_aopc_del: Advanced metrics
+- batch_loss_histories_by: Loss histories per component
+- batch_final_losses_by: Final losses per batch
+- batch_times: Time per batch
+- flags: All configuration flags
+
+---------------------------------
+6.2. RESUME TỪ CHECKPOINT
+---------------------------------
+
+**Basic resume:**
+```powershell
+python generate_opticam_multi.py \
+    --name_path "LongRun_K3" \
+    --resume_checkpoint "results/LongRun_K3/checkpoints/checkpoint_batch_60.pt" \
+    --num_masks 3 --max_iter 100 --batch_size 10 --learning_rate 1e-3
+```
+
+**Resume với override start_batch:**
+```powershell
+python generate_opticam_multi.py \
+    --name_path "LongRun_K3" \
+    --resume_checkpoint "results/LongRun_K3/checkpoints/checkpoint_batch_60.pt" \
+    --start_batch 50 \
+    --num_masks 3 --max_iter 100 --batch_size 10 --learning_rate 1e-3
+```
+
+**Workflow cho long experiments:**
+
+1. Chạy lần đầu:
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Experiment_Full_Dataset" \
+    --num_masks 3 --lambda_consistency 1.0 \
+    --max_iter 100 --batch_size 10 --learning_rate 1e-3
+```
+
+2. Nếu bị interrupt (Ctrl+C, crash, v.v.):
+```powershell
+# Script tự động load checkpoint gần nhất
+python generate_opticam_multi.py \
+    --name_path "Experiment_Full_Dataset" \
+    --resume_checkpoint "results/Experiment_Full_Dataset/checkpoints/checkpoint_batch_60.pt" \
+    --num_masks 3 --lambda_consistency 1.0 \
+    --max_iter 100 --batch_size 10 --learning_rate 1e-3
+```
+
+3. Tiếp tục seamlessly - không mất data!
+
+**Lưu ý quan trọng:**
+- Config flags phải GIỐNG NHAU (num_masks, lambda, learning_rate, etc.)
+- Script kiểm tra consistency: nếu flags khác, sẽ warning
+- Checkpoint không lưu model weights (chỉ optimization state và metrics)
+- Safe: không ghi đè data cũ, chỉ append data mới
+
+---------------------------------
+6.3. BASELINE CHECKPOINTING (EXPERIMENTAL)
+---------------------------------
+
+Baseline cũng hỗ trợ checkpoint nhưng ít dùng (ảnh ít, chạy nhanh):
+
+```powershell
+python generate_opticam.py \
+    --name_path "Baseline_Long" \
+    --resume_checkpoint "results/Baseline_Long/checkpoints/checkpoint_batch_60.pt" \
+    --start_batch 60 \
+    --max_iter 100 --batch_size 10 --learning_rate 1e-3
+```
+
+================================================================================
+7. CONFIG EXAMPLES CHO ABLATION STUDY
+================================================================================
+
+Dựa trên phân tích Beta weights và linearity test, đây là configs khuyến nghị:
+
+7.1. FULL ABLATION STUDY (4 CONFIGS)
+---------------------------------
+
+**Config A: Baseline K=1 (No consistency - tautological)**
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Config_A_Baseline_K1" \
+    --num_masks 1 --lambda_consistency 0.0 \
+    --init_method constant \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+Mục đích: Baseline reference (1 mask, no decomposition).
+
+**Config B: K=1 + Consistency λ=1.0 (Trivial - not recommended)**
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Config_B_K1_Consistency" \
+    --num_masks 1 --lambda_consistency 1.0 \
+    --init_method constant \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+Lưu ý: Consistency trivially satisfied khi K=1 (c₁ = c_original by definition).
+       Config này KHÔNG đóng góp scientific value!
+
+**Config C: K=3 No Consistency λ=0 (Decomposition only)**
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Config_C_K3_NoConsistency" \
+    --num_masks 3 --lambda_consistency 0.0 \
+    --init_method adaptive \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+Mục đích: Test decomposition WITHOUT explicit consistency enforcement.
+Kết quả: ~99.9% consistency accuracy (fidelity tự động enforce do quasi-linearity).
+
+**Config D: K=3 + Consistency λ=1.0 (Full method)**
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Config_D_K3_Consistency" \
+    --num_masks 3 --lambda_consistency 1.0 \
+    --init_method adaptive \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+Mục đích: Full Multi-Component với explicit consistency constraint.
+Kết quả: ~99.9% consistency accuracy (tương tự Config C, improvement ~0.05%).
+
+**Kết luận từ thực nghiệm:**
+- Config A → C: Thêm decomposition (K=3) → consistency tự động đạt 99.9%
+- Config C → D: Thêm λ=1.0 → cải thiện ~0.05% (minimal)
+- Config B: Scientifically meaningless (consistency trivial khi K=1)
+
+**Ablation narrative cho thesis:**
+1. A: Baseline (1 mask)
+2. C: Multi-component (K=3, no explicit constraint) → 99.9% consistency
+3. D: + Explicit constraint (λ=1.0) → 99.9% consistency
+4. Conclusion: Fidelity loss implicitly enforces consistency (quasi-linearity)
+
+---------------------------------
+7.2. SIMPLIFIED ABLATION (3 CONFIGS - RECOMMENDED)
+---------------------------------
+
+Bỏ Config B (trivial), focus vào meaningful comparisons:
+
+**Config A: Baseline**
+```powershell
+python generate_opticam.py \
+    --name_path "Ablation_A_Baseline" \
+    --objective mask --use_logit \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+
+**Config C: Multi K=3 No Constraint**
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Ablation_C_K3_NoConstraint" \
+    --num_masks 3 --lambda_consistency 0.0 \
+    --init_method adaptive \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+
+**Config D: Multi K=3 With Constraint**
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Ablation_D_K3_WithConstraint" \
+    --num_masks 3 --lambda_consistency 1.0 \
+    --init_method adaptive \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+
+**Narrative:**
+- A → C: Decomposition improves diversity, consistency emerges naturally
+- C → D: Explicit constraint adds marginal improvement (quasi-linearity)
+
+---------------------------------
+7.3. LAMBDA SWEEP (RESEARCH)
+---------------------------------
+
+Test different lambda values để tìm optimal:
+
+```powershell
+# λ=0 (no constraint)
+python generate_opticam_multi.py --name_path "Lambda_0" \
+    --num_masks 3 --lambda_consistency 0.0 --max_iter 50
+
+# λ=0.5
+python generate_opticam_multi.py --name_path "Lambda_0.5" \
+    --num_masks 3 --lambda_consistency 0.5 --max_iter 50
+
+# λ=1.0 (standard)
+python generate_opticam_multi.py --name_path "Lambda_1.0" \
+    --num_masks 3 --lambda_consistency 1.0 --max_iter 50
+
+# λ=2.0
+python generate_opticam_multi.py --name_path "Lambda_2.0" \
+    --num_masks 3 --lambda_consistency 2.0 --max_iter 50
+
+# λ=5.0 (strong)
+python generate_opticam_multi.py --name_path "Lambda_5.0" \
+    --num_masks 3 --lambda_consistency 5.0 --max_iter 50
+```
+
+Kết quả expected: Minimal improvement từ λ=1.0 → 5.0 (quasi-linearity).
+
+---------------------------------
+7.4. K SWEEP (COMPONENT COUNT)
+---------------------------------
+
+Test different K values:
+
+```powershell
+# K=1 (baseline)
+python generate_opticam_multi.py --name_path "K_1" \
+    --num_masks 1 --lambda_consistency 0.0 --max_iter 50
+
+# K=3 (standard)
+python generate_opticam_multi.py --name_path "K_3" \
+    --num_masks 3 --lambda_consistency 1.0 --max_iter 50
+
+# K=5
+python generate_opticam_multi.py --name_path "K_5" \
+    --num_masks 5 --lambda_consistency 1.0 --max_iter 100
+
+# K=10 (high decomposition)
+python generate_opticam_multi.py --name_path "K_10" \
+    --num_masks 10 --lambda_consistency 1.0 --max_iter 100 \
+    --use_mixed_precision
+```
+
+Trade-off:
+- K↑: More decomposition, slower training
+- K=3-5: Sweet spot (balance diversity vs speed)
+- K>10: Risk of overfitting, diminishing returns
+
+---------------------------------
+7.5. INITIALIZATION COMPARISON
+---------------------------------
+
+Test 3 initialization strategies:
+
+```powershell
+# Adaptive (recommended)
+python generate_opticam_multi.py --name_path "Init_Adaptive" \
+    --num_masks 3 --init_method adaptive --max_iter 50
+
+# Random (breaks symmetry strongly)
+python generate_opticam_multi.py --name_path "Init_Random" \
+    --num_masks 3 --init_method random --max_iter 50
+
+# Constant (⚠️ symmetry problem if K>1)
+python generate_opticam_multi.py --name_path "Init_Constant" \
+    --num_masks 3 --init_method constant --max_iter 50
+```
+
+Expected: Adaptive ≥ Random >> Constant (symmetry issue).
+
+================================================================================
+8. TROUBLESHOOTING
+================================================================================
+
+8.1. COMMON ERRORS
+---------------------------------
+
+**Error: "CUDA out of memory"**
+Solutions:
+  - Giảm batch_size: --batch_size 5 → --batch_size 1
+  - Disable mixed precision: không dùng --use_mixed_precision
+  - Reduce max_batch_size: --max_batch_size 40
+  - Disable advanced metrics: --no_adv_metrics
+
+**Error: "Checkpoint not found"**
+Solutions:
+  - Check path: ls results/<name>/checkpoints/
+  - Dùng absolute path: --resume_checkpoint "D:/path/to/checkpoint.pt"
+  - Verify checkpoint exists: checkpoint_batch_<idx>.pt
+
+**Error: "Config flags mismatch"**
+Solutions:
+  - Dùng ĐÚNG config khi resume (num_masks, lambda, etc.)
+  - Check FLAGS in checkpoint: torch.load("checkpoint.pt")['flags']
+
+**Warning: "init_method='constant' with K>1 may cause symmetry"**
+Solutions:
+  - Đổi sang adaptive: --init_method adaptive
+  - Hoặc random: --init_method random
+
+---------------------------------
+8.2. PERFORMANCE OPTIMIZATION
+---------------------------------
+
+**Chạy chậm?**
+- Bật mixed precision: --use_mixed_precision (CUDA only)
+- Tăng batch_size: --batch_size 10
+- Disable advanced metrics: --no_adv_metrics
+- Giảm iterations: --max_iter 20 (quick test)
+
+**Memory issues?**
+- Giảm batch_size: --batch_size 1
+- Giảm max_batch_size: --max_batch_size 40
+- Disable batched forward: --max_batch_size 0 (chậm hơn ~75%)
+
+**Muốn kết quả nhanh?**
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Quick_Test" \
+    --num_masks 3 --max_iter 10 --batch_size 10 \
+    --no_adv_metrics
+```
+
+---------------------------------
+8.3. DEBUGGING
+---------------------------------
+
+**Check beta weights:**
+```powershell
+python tools/analyze_beta_weights.py --results_dir "results/<name>"
+```
+
+**Test linearity:**
+```powershell
+python quick_linearity_test.py
+```
+
+**Debug reconstruction:**
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Debug_Recon" \
+    --dbg_recon --num_masks 3 --max_iter 10
+```
+
+**Verify metrics:**
+```powershell
+# Check metrics_summary.txt
+cat results/<name>/metrics/metrics_summary.txt
+
+# Check per-image CSV
+head -20 results/<name>/metrics/total/metrics_per_image.csv
+```
+
+---------------------------------
+8.4. GPU COMPATIBILITY
+---------------------------------
+
+**Check CUDA:**
+```powershell
+python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+```
+
+**Mixed precision requirements:**
+- CUDA device (GPU)
+- PyTorch >= 1.6
+- GPU with Tensor Cores (RTX 20/30 series, A100, etc.) cho speedup tốt nhất
+
+**CPU fallback:**
+Tất cả scripts tự động fallback về CPU nếu CUDA unavailable.
+Performance: ~10-20x chậm hơn GPU.
+
+================================================================================
+9. FILE STRUCTURE REFERENCE
+================================================================================
+
+**Sau khi chạy, results folder structure:**
+
+```
+results/
+└── <name_path>/
+    ├── images/               # Overlay visualizations
+    │   ├── <image>_overlay.png
+    │   └── ...
+    ├── masks/                # Mask .npy files (Multi only)
+    │   ├── <image>_m1.npy
+    │   ├── <image>_m2.npy
+    │   └── ...
+    ├── plot/                 # Per-image loss histories (.npy)
+    │   ├── <image>_Loss.npy (Baseline)
+    │   ├── <image>_Total_Loss.npy (Multi)
+    │   ├── <image>_Fidelity_Loss.npy
+    │   └── ...
+    ├── scalars/              # Learned beta weights (Multi only)
+    │   ├── <image>_c.npy
+    │   └── ...
+    ├── metrics/              # Aggregated metrics
+    │   ├── metrics_summary.txt
+    │   ├── total/
+    │   │   ├── metrics_per_image.csv
+    │   │   ├── batch_loss_histories_total.npy
+    │   │   ├── batch_final_losses_total.npy
+    │   │   └── ...
+    │   ├── fidelity/         # Multi only
+    │   ├── consistency/      # Multi only
+    │   ├── lambda/           # Multi only
+    │   ├── violation/        # Multi only
+    │   ├── component_losses_analysis.png (Multi only)
+    │   ├── beta_weights_evolution.png (Multi only - after analyze_beta_weights.py)
+    │   └── beta_weights_distribution.png (Multi only)
+    ├── checkpoints/          # Checkpoint files (Multi)
+    │   ├── checkpoint_batch_10.pt
+    │   ├── checkpoint_batch_20.pt
+    │   └── ...
+    └── run_log.txt           # CSV log của tất cả runs
+```
+
+================================================================================
+10. QUICK REFERENCE
+================================================================================
+
+**Baseline standard run:**
+```powershell
+python generate_opticam.py \
+    --name_path "Baseline" --objective mask --use_logit \
+    --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+
+**Multi standard run:**
+```powershell
+python generate_opticam_multi.py \
+    --name_path "Multi_K3" --num_masks 3 --lambda_consistency 1.0 \
+    --init_method adaptive --max_iter 50 --batch_size 5 --learning_rate 1e-3
+```
+
+**Generate plots:**
+```powershell
+python tools/plot_from_npy.py --results_dir "results/<name>"
+```
+
+**Analyze beta weights:**
+```powershell
+python tools/analyze_beta_weights.py --results_dir "results/<name>"
+```
+
+**Resume từ checkpoint:**
+```powershell
+python generate_opticam_multi.py \
+    --resume_checkpoint "results/<name>/checkpoints/checkpoint_batch_<idx>.pt" \
+    <...same flags as original run...>
+```
+
+================================================================================
+HẾT HƯỚNG DẪN
+================================================================================
+
+Để được hỗ trợ thêm, xem:
+- OPTICAM_THEORY_COMPREHENSIVE.md: Lý thuyết chi tiết
+- Code comments trong generate_opticam.py, generate_opticam_multi.py, util.py
+- GitHub issues (nếu có)
+
+
+#Monke to Fish: Các Config đã chạy thử:
+
+# Config A: Baseline - Maximize in Logit space (Paper default)
+python generate_opticam.py \
+    --use_logit --objective=mask \
+    --learning_rate=1e-3 --batch_size=10 --max_iter=100 \
+    --name_path="Baseline_Maximize_Logit"
+
+# Config B: Baseline - Maximize in Prob space
+python generate_opticam.py \
+    --objective=mask \
+    --learning_rate=1e-3 --batch_size=10 --max_iter=100 \
+    --name_path="Baseline_Maximize_Prob"
+
+# Config C: Baseline - Preserve in Prob space (SAME as Multi)
+python generate_opticam.py \
+    --objective=diff \
+    --learning_rate=1e-3 --batch_size=10 --max_iter=100 \
+    --name_path="Baseline_Preserve_Prob"
+
+# Config D: Multi - Preserve in Prob space + Consistency
+python generate_opticam_multi.py \
+    --num_masks=3 \
+    --use_lambda_scheduling --lambda_start=1.0 --lambda_end=0.3 \
+    --learning_rate=1e-3 --batch_size=10 --max_iter=100 \
+    --mask_scaling --use_mixed_precision \
+    --name_path="Multi_PureProb_Standard"
+
+
+##Note: Phần trên là lý thuyết và công dụng của các flag. Chủ yếu nếu ông chạy thì chạy các Config này.
+File test_ablation_configs.txt là file Chat mới tạo để thử khi K = 1 (tương ứng với OptiCAM gốc) và K > 1  với Lambda tắt/ mở cho bản Multi.
+Chủ yếu là thử nghiệm và kiểm chứng xem OptiCAM Multi có bắt nguồn từ OptiCAM gốc không.
+File OPTICAM_THEORY_COMPREHENSIVE là lý thuyết.
+File To-do là các task t nghĩ còn thiếu. Hiện tại có cái masking giống nhau thì t chịu.
+File AI Respond Instruction là file gồm luật làm việc, mục tiêu luận văn với quy trình thầy đề cập.
+##
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

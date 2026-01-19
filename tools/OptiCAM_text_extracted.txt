@@ -1,0 +1,1632 @@
+Computer Vision and Image Understanding 248 (2024) 104101
+Contents lists available at ScienceDirect
+Computer Vision and Image Understanding
+journal homepage: www.elsevier.com/locate/cviu
+Opti-CAM: Optimizing saliency maps for interpretability
+Hanwei Zhanga,∗, Felipe Torresa, Ronan Sicrea, Yannis Avrithisb, Stephane Ayachea
+aCentrale Marseille, Aix Marseille Univ, CNRS, LIS, Marseille, France
+bInstitute of Advanced Research on Artificial Intelligence (IARAI), Austria
+A R T I C L E I N F O
+Communicated by Juergen Gall
+MSC:
+41A05
+41A10
+65D05
+65D17
+Keywords:
+Interpretability
+Explainable AI
+Saliency map
+Class activation maps
+Computer visionA B S T R A C T
+Methods based on class activation maps (CAM) provide a simple mechanism to interpret predictions of
+convolutional neural networks by using linear combinations of feature maps as saliency maps. By contrast,
+masking-based methods optimize a saliency map directly in the image space or learn it by training another
+network on additional data. In this work we introduce Opti-CAM, combining ideas from CAM-based and
+masking-based approaches. Our saliency map is a linear combination of feature maps, where weights are
+optimized per image such that the logit of the masked image for a given class is maximized. We also fix a
+fundamental flaw in two of the most common evaluation metrics of attribution methods. On several datasets,
+Opti-CAM largely outperforms other CAM-based approaches according to the most relevant classification
+metrics. We provide empirical evidence supporting that localization and classifier interpretability are not
+necessarily aligned.
+1. Introduction
+The success of deep neural networks (DNN) and their increasing pene-
+tration into most sectors of human activity have led to growing interest
+in understanding how these models make their predictions. Unlike
+shallow methods, DNNs have a high complexity and it is not possible
+to directly explain their inference process in a human understandable
+manner. This challenge has opened up an entire research field (Guidotti
+et al., 2018; Montavon et al., 2018; Samek et al., 2021; Bodria et al.,
+2021; Li et al., 2021).
+In this work, we are interested in the interpretability of deep neural
+networks through the generation of saliency maps , highlighting regions
+of an image that are responsible for the prediction. This originates in
+gradient-based methods (Simonyan et al., 2014; Yosinski et al., 2015),
+including variants of backpropagation (Zeiler and Fergus, 2014; Sprin-
+genberg et al., 2015; Bach et al., 2015). CAM (Zhou et al., 2016)
+introduced class-specific linear combinations of feature maps, and led
+to several alternative weighting schemes (desai and Ramaswamy, 2020;
+Wang et al., 2020; Muhammad and Yeasin, 2020), including the use
+of gradients (Selvaraju et al., 2017; Chattopadhay et al., 2018). On
+the other hand, occlusion- ormasking-based methods (Dabkowski and
+Gal, 2017; Fong and Vedaldi, 2017; Fong et al., 2019; Schulz et al.,
+2020) remove regions in the image space while improving classification
+performance.
+Score-CAM (Wang et al., 2020) is a CAM-based method where the
+weight of each feature map is defined by using that feature map as
+∗Corresponding author.
+E-mail addresses: hanwei.zhang@lis-lab.fr, zhang@depend.uni-saarland.de (H. Zhang).a mask and measuring the resulting increase of class score; hence, it
+is both CAM-based and masking-based but does not use gradients. It
+resembles the numerical gradient approximation, in that it needs one
+forward pass per weight . Instead, the analytical approach would be to use
+a linear combination of feature maps as a mask, express the class score
+as a function of the weights and measure the gradient analytically, in
+asingle backward pass . Then, why not use gradient descent to maximize
+the class score? Like Score-CAM, the optimal mask should highlight
+regions for which the network is most confident. But, as a result of the
+optimization process, this mask should be obtained in a more principled
+and efficient way.
+Masking-based methods, such as extremal perturbations (Fong et al.,
+2019) or IBA (Schulz et al., 2020), introduce a mask as a variable in the
+input or feature space, express the class score as a function of this mask
+and use gradient descent to maximize the class score. Because the vari-
+able being optimized is a high-dimensional image or tensor, additional
+constraints or regularizers are needed to control e.g.the smoothness
+and the salient area. This translates to more hyperparameters or more
+expensive optimization.
+Motivated by the above, we introduce Opti-CAM, illustrated in
+Fig. 1. We form a linear combination of feature maps, where the
+weights are a variable. Treating it as a saliency map, we form a
+masked version of the input image that is fed again to the network.
+Then, the logit of a given class for the masked version of the input
+https://doi.org/10.1016/j.cviu.2024.104101
+Received 22 January 2024; Received in revised form 5 June 2024; Accepted 28 July 2024
+Available online 8 August 2024
+1077-3142/ ©2024 The Author(s). Published by Elsevier Inc. This is an open access article under the CC BY-NC license
+(http://creativecommons.org/licenses/by-nc/4.0/).
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+Fig. 1. Overview of Opti-CAM. We are given an input image 𝐱, a fixed network 𝑓, a target layer 𝓁and a class of interest 𝑐. We extract the feature maps from layer 𝓁and obtain
+a saliency map 𝑆𝓁(𝐱;𝐮)by forming a convex combination of the feature maps ( ×) with weights determined by a variable vector 𝐮(8). After upsampling and normalizing, we
+element-wise multiply ( ⊙) the saliency map with the input image to form a ‘‘masked’’ version of the input, which is fed to 𝑓. The objective function 𝐹𝑐
+𝓁(𝐱;𝐮)measures the logit
+of class𝑐for the masked image (10). We find the value of 𝐮∗that maximizes this logit by optimizing along the path highlighted in blue (9), as well as the corresponding optimal
+saliency map 𝑆𝓁(𝐱;𝐮∗)(11).
+is maximized to obtain the optimal weights. Thus, Opti-CAM can be
+seen as an analytical counterpart of Score-CAM, where weights of the
+linear combination are updated by a single backward pass, thus can be
+optimized iteratively. It can also be seen as a masking-based method,
+where the mask to be optimized lies in the linear span of the feature
+maps, like CAM-based methods.
+The evaluation metrics most relevant to the use of a saliency map as
+a mask are average drop (AD) and average increase (AI) (Chattopadhay
+et al., 2018). The problem is that the two metrics are not defined in a
+symmetric way. As a result, there exists a trivial attribution method
+called Fake-CAM (Poppi et al., 2021) that outperforms the state of
+the art in both metrics. To address this, we introduce the symmetric
+counterpart of AD, which we call average gain (AG), to be paired with
+ADas a replacement of AI. As expected, Fake-CAM fails AG.
+In summary, we make the following contributions:
+1. We introduce Opti-CAM, a simple model for saliency map gener-
+ation that combines ideas from CAM-based and masking-based
+approaches. Opti-CAM does not need any extra data, network or
+training.
+2. Compared with gradient-free methods (Wang et al., 2020; Pet-
+siuk et al., 2018; desai and Ramaswamy, 2020), it finds the
+optimal feature map weights and is on par or faster, assuming
+that the number of iterations is less than the number of channels.
+3. We introduce a new evaluation metric, average gain (AG), to
+be paired with average drop (AD) as a replacement of average
+increase (AI) (Chattopadhay et al., 2018).
+4. On several datasets, we improve the state of the art by a large
+margin, reaching near-perfect performance according to the
+most relevant classification metrics.
+5. We shed more light into how a classifier may exploit background
+context.
+2. Related work
+A large number of works study explainability ,interpretability or
+attribution of machine learning models, especially DNN (Guidotti et al.,
+2018; Montavon et al., 2018; Samek et al., 2021; Bodria et al., 2021;
+Li et al., 2021). These works can be categorized into transparency
+and post-hoc interpretability (Lipton, 2018; Guidotti et al., 2018). The
+former addresses how to design an internally understandable model.
+Here we are interested in the latter, which keeps the studied network
+fixed and interprets its inner processing (Ribeiro et al., 2016; Lundberg
+and Lee, 2017; Linardatos et al., 2020). Among post-hoc methods,
+LIME (Ribeiro et al., 2016) and SHAP (Lundberg and Lee, 2017) are
+well-known model-agnostic methods that rate feature importance. More
+specifically, we are interested in the generation of saliency maps . These
+methods are mostly based on gradients, CAM (Zhou et al., 2016),
+occlusion, or a combination.Gradient-based methods. Gradient-based methods (Adebayo et al., 2018a;
+Springenberg et al., 2015; Baehrens et al., 2010) use the gradient of a
+target class score with respect to the input to measure the effect of
+different image regions on the prediction. In Simonyan et al. (2014),
+the gradient is directly treated as a saliency map. Inspired by Decon-
+vNet (Zeiler and Fergus, 2014), guided backpropagation (Springenberg
+et al., 2015) improves the explanation by setting negative gradients to
+zero using ReLU units. Other methods (Shrikumar et al., 2017; Zhang
+et al., 2018; Bastings and Filippova, 2020) are inspired by Layer-wise
+Relevance Propagation (LRP) (Bach et al., 2015). SmoothGrad (Smilkov
+et al., 2017) and integrated gradients (Sundararajan et al., 2017) accu-
+mulate gradients into saliency maps, while NormGrad (Rebuffi et al.,
+2020) attempts to unify gradient-based methods.
+A different approach is to use adversarial attacks (Elliott et al., 2021;
+Jalwana et al., 2020). These search along the gradient to identify pixels
+that, when modified, lead to changes in the model prediction. The
+identified pixels are considered significant for the prediction. Gradient-
+based methods do not always satisfy the fundamental property of
+implementation invariance; for example, DeepLift and LRP are not al-
+ways identical for two functionally equivalent networks (Sundararajan
+et al., 2017).
+CAM-based methods. Class activation maps (CAM) (Zhou et al., 2016) is
+a visualization method that highlights the image regions most relevant
+to a target class by a linear combination of feature maps. A number of
+variants use different definitions of weights. Many rely on gradients, in-
+cluding GradCAM (Selvaraju et al., 2017), GradCAM++ (Chattopadhay
+et al., 2018), and XGradCAM (Fu et al., 2020). Gradient-free methods,
+including Ablation-CAM (desai and Ramaswamy, 2020) and Score-
+CAM (Wang et al., 2020), rather measure the effect on the target class
+score of each feature map acting as a mask on the input. Additional
+methods can be found in the survey conducted by He et al. (2022).
+We inherit the idea of masking but for linear combinations of feature
+maps and we iteratively optimize the coefficients by analytical gradient
+computation. Our method is thus faster when the number of iterations
+is less than the number of channels.
+Occlusion (masking)-based methods. These methods use a number of
+candidate masks, measure their effect on the prediction, then combine
+them in a single saliency map. LIME (Ribeiro et al., 2016) approximates
+the behavior of complex models through the creation of local surrogate
+models based on perturbations of inputs. LIME relies on superpixels to
+define the fundamental elements for perturbation and masking. This
+approach proves either too computationally intensive or too coarse for
+high-resolution images. Based on game theory, SHAP (Lundberg and
+Lee, 2017) provides a unified framework to estimate the importance
+of inputs through SHAP values. SHAP-based methods also face the
+challenge of balancing performance with computational complexity.
+RISE (Petsiuk et al., 2018) randomly masks input images and uses
+the class score as a weight to define a linear combination. Some
+2
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+occlusion-based methods are combined with gradients. Meaningful per-
+turbations (Fong and Vedaldi, 2017) and extremal perturbations (Fong
+et al., 2019) directly optimize the mask in the image space by using
+gradients. They require a large number of parameters as well as regular-
+izers, e.g.for smoothness. Information bottleneck attribution (IBA) (Schulz
+et al., 2020) optimizes the mask in the feature space as a tensor instead.
+Score-CAM (Wang et al., 2020) is also an occlusion-based method, using
+individual feature maps as candidate masks. The same holds for our
+Opti-CAM, but for candidate masks constrained in the linear span of the
+feature maps. Compared with Fong et al. (2019), Schulz et al. (2020),
+we have fewer parameters and do not require a regularizer.
+Learning-based methods. While occlusion-based methods compute or
+optimize a mask for a particular image at inference, learning-based
+methods use an additional network or branch and they train it on extra
+data and image-level labels to predict a saliency map given an input
+image. This includes for example generators (Chang et al., 2019) or
+auto-encoders (Dabkowski and Gal, 2017; Phang et al., 2020; Zolna
+et al., 2020). This approach may be compared with weakly-supervised
+object detection (Bilen and Vedaldi, 2016), segmentation (Kolesnikov
+and Lampert, 2016) or instance segmentation (Ahn et al., 2019).
+IBA (Schulz et al., 2020) includes a learning-based approach in the
+feature space. Apart from requiring extra data, it is not satisfying in
+the sense that the learned decoder would need to be explained too.
+Our method does not need any extra data, network, or training.
+Evaluation of attribution methods. Evaluating saliency maps is chal-
+lenging because no ground truth attributions exist. Some studies uti-
+lize object segment masks as attribution ground truth, as noted by
+Szczepankiewicz et al. (2023), yet this approach primarily concerns
+localization. Other studies use gaze density fixation maps as a reference
+for ground truth (Szczepankiewicz et al., 2023). We contend that these
+ground truth methods solely provide information about images. While
+comparing saliency maps to these references aids in understanding the
+degree of alignment between network cognition and human perception,
+it overlooks crucial network information. We advocate that the ground
+truth should incorporate both image and network information. Such
+ground truth does not exist.
+In the evaluation of attribution methods, metrics are categorized
+according to several key properties, including faithfulness, robustness,
+localization, complexity and randomization (Hedström et al., 2023).
+Each property carries distinct assumptions regarding the saliency maps
+generated by these methods. Faithfulness, in particular, stands out as it
+directly correlates with the accuracy of the classification score. Given
+its direct relationship to model performance, we prioritize this cate-
+gory as it provides crucial insights into how faithfully the attribution
+method represents the model’s decision-making process. By focusing on
+faithfulness, we aim to ensure that the attribution method accurately
+captures the reasoning of the model.
+Average drop (AD) and average increase (AI), also known as increase
+in confidence (Chattopadhay et al., 2018) are well-established metrics.
+They consider the effect on the predicted class probabilities by masking
+the input image with the saliency map. There is a fundamental flaw in
+using AD,AIas a pair of metrics, which we fix by replacing AIby a
+new metric, average gain (AG).
+Insertion (I) and deletion (D) sequentially insert or delete pixels by
+decreasing order of saliency and observe the effect on the prediction.
+The resulting images are out-of-distribution (OOD) (Gomez et al., 2022)
+and the metrics favor small and compact regions. Localization metrics
+measure how the saliency maps are aligned with object bounding
+boxes, which ignores the importance of background context (Shetty
+et al., 2019; Rao et al., 2022). We demonstrate that localization and
+attribution are not well-aligned as tasks.3. Opti-CAM
+3.1. Preliminaries
+Notation. Consider a classifier network 𝑓∶→R𝐶that maps an
+input image 𝐱∈to a logit vector 𝐲=𝑓(𝐱) ∈R𝐶, where is the
+image space and 𝐶is the number of classes. We denote by 𝑦𝑐=𝑓(𝐱)𝑐
+the predicted logit and by 𝑝𝑐= softmax( 𝐲)𝑐∶=𝑒𝑦𝑐∕∑
+𝑗𝑒𝑦𝑗the predicted
+probability for class 𝑐. For layer 𝓁with𝐾𝓁channels, we denote by
+𝐴𝑘
+𝓁=𝑓𝑘
+𝓁(𝐱) ∈Rℎ𝓁×𝑤𝓁the feature map for channel 𝑘∈ {1,…,𝐾𝓁},
+with spatial resolution ℎ𝓁×𝑤𝓁. Because of relunon-linearities, we
+assume that feature maps are non-negative. Similarly, we denote by
+𝑆𝓁∈Rℎ𝓁×𝑤𝓁a 2D saliency map.
+Background: CAM-based saliency maps. Given a layer 𝓁and a class of
+interest𝑐, we consider saliency maps given by the general formula
+𝑆𝑐
+𝓁(𝐱)∶=ℎ(
+∑
+𝑘𝑤𝑐
+𝑘𝐴𝑘
+𝓁)
+, (1)
+where𝑤𝑐
+𝑘are weights defining a linear combination over channels and
+ℎis an activation function. CAM (Zhou et al., 2016) is defined for
+the last layer 𝐿only withℎbeing the identity mapping and 𝑤𝑐
+𝑘being
+the classifier weight connecting the 𝑘th channel with class 𝑐. Grad-
+CAM (Selvaraju et al., 2017) is defined for any layer 𝓁withℎ= relu
+and weights
+𝑤𝑐
+𝑘∶= GAP(
+𝜕𝑦𝑐
+𝜕𝐴𝑘
+𝓁)
+, (2)
+where GAP is global average pooling. The motivation for reluis that we
+are only interested in features that have a positive effect on the class
+of interest, i.e.pixels whose intensity should be increased in order to
+increase𝑦𝑐.
+Score-CAM (Wang et al., 2020) is also defined for any layer 𝓁
+withℎ= relu and weights 𝑤𝑐
+𝑘∶= softmax( 𝐮𝑐)𝑘. Softmax normalization
+considers positive channel contributions only and attends to few feature
+maps. Here, vector 𝐮𝑐∈R𝐾𝓁measures the increase in confidence for
+class𝑐that compares a known baseline image 𝐱𝑏with the input image
+𝐱masked according to feature map 𝐴𝑘
+𝓁, for all channels 𝑘:
+𝑢𝑐
+𝑘∶=𝑓(𝐱⊙𝑛(up(𝐴𝑘
+𝓁)))
+𝑐−𝑓(𝐱𝑏)𝑐, (3)
+where⊙is the Hadamard product. For this to work, the feature map
+𝐴𝑘
+𝓁is adapted to 𝐱first: updenotes upsampling to the spatial resolution
+of𝐱and
+𝑛(𝐴)∶=𝐴− min𝐴
+max𝐴− min𝐴(4)
+is a normalization of matrix 𝐴into [0,1]. While Score-CAM does not
+need gradients, it requires as many forward passes through the network
+as the number of channels in the chosen layer, which is computationally
+expensive.
+Motivation. Score-CAM considers each feature map as a mask in isola-
+tion. How about linear combinations? Given a vector 𝐰∈R𝐾𝓁with𝑤𝑘
+its𝑘th element, let
+𝐹(𝐰)∶=𝑓(
+𝐱⊙𝑛(
+up(
+∑
+𝑘𝑤𝑘𝐴𝑘
+𝓁)))
+𝑐. (5)
+If we assume that 𝐱𝑏=𝟎in (3) and define 𝑛(𝟎)∶=𝟎in (4), then we can
+rewrite the right-hand side of (3) as
+𝐹(𝐰0+𝛿𝐞𝑘) −𝐹(𝐰0)
+𝛿, (6)
+where 𝐰0=𝟎,𝛿= 1and𝐞𝑘is the𝑘th standard basis vector of R𝐾𝓁.
+This resembles the numerical approximation of the derivative𝜕𝐹
+𝜕𝑤𝑘(𝐰0),
+except that 𝛿is not small as usual. One could compute derivatives
+efficiently by standard backpropagation instead. It is then possible to
+iteratively optimize 𝐹with respect to 𝐰, starting at any 𝐰0.
+3
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+As an alternative, consider masking-based methods relying on opti-
+mization in the input space, like meaningful perturbations (MP) (Fong
+and Vedaldi, 2017) or extremal perturbations (Fong et al., 2019). In
+general, optimization takes the form
+𝑆𝑐(𝐱)∶= arg max
+𝐦∈𝑓(𝐱⊙𝑛(up(𝐦)))𝑐+𝜆𝑅(𝐦). (7)
+Here, a mask 𝐦is directly optimized and does not rely on feature maps,
+hence the saliency map 𝑆𝑥(𝐱)is not connected to any layer 𝓁. The mask
+is at the same or lower resolution than the input image. In the latter
+case, upsampling is still necessary.
+In this approach, one indeed computes derivatives by backprop-
+agation and indeed iteratively optimizes 𝐦. However, because 𝐦is
+high-dimensional, there are constraints expressed by 𝐦∈,e.g.𝐦
+has a certain norm, and regularizers like 𝑅(𝐦),e.g.𝐦is smooth in a
+certain way. This makes optimization harder or more expensive and
+introduces more hyperparameters like 𝜆. One could simply constrain 𝐦
+to lie in the linear span of {𝐴𝑘
+𝓁}𝐾𝓁
+𝑘=1instead, like all CAM-based methods.
+3.2. Method
+Saliency maps. As motivated by Section 3.1, we obtain a saliency map
+as a convex combination of feature maps by optimizing a given objec-
+tive function with respect to the weights. In particular, following Wang
+et al. (2020), we use channel weights 𝑤𝑘∶= softmax( 𝐮)𝑘, where 𝐮∈R𝐾𝓁
+is a variable. We then consider saliency map 𝑆𝓁in layer𝓁as a function
+of both the input image 𝐱and variable 𝐮:
+𝑆𝓁(𝐱;𝐮)∶=ℎ(
+∑
+𝑘softmax( 𝐮)𝑘𝐴𝑘
+𝓁)
+. (8)
+Comparing with (1), ℎcan be any function including the identity
+function or the activation function used by the network, because we
+normalize𝑆𝓁to make it non-negative.
+Optimization. Now, given a layer 𝓁and a class of interest 𝑐, we find
+the vector 𝐮∗that maximizes the classifier confidence for class 𝑐, when
+the input image 𝐱is masked according to saliency map 𝑆𝓁(𝐱;𝐮∗):
+𝐮∗∶= arg max
+𝐮𝐹𝑐
+𝓁(𝐱;𝐮), (9)
+where we define the objective function
+𝐹𝑐
+𝓁(𝐱;𝐮)∶=𝑔𝑐(𝑓(𝐱⊙𝑛(up(𝑆𝓁(𝐱;𝐮))))). (10)
+Here, the saliency map 𝑆𝓁(𝐱;𝐮)is adapted to 𝐱exactly as in (3) in terms
+of resolution and normalization. For normalization function 𝑛, the default
+is (4). The selector function 𝑔𝑐operates on the logit vector 𝐲; the default
+is to select the logit of class 𝑐,i.e.𝑔𝑐(𝐲)∶=𝑦𝑐. Other choices, including
+the definition of 𝐹𝑐
+𝓁itself, are investigated in Section 5.5 and in the
+supplementary material.
+Opti-CAM. Putting everything together, we define
+𝑆𝑐
+𝓁(𝐱)∶=𝑆𝓁(𝐱;𝐮∗) =𝑆𝓁(
+𝐱; arg max
+𝐮𝐹𝑐
+𝓁(𝐱;𝐮))
+, (11)
+where𝑆𝓁and𝐹𝑐
+𝓁are defined by (8) and (10) respectively. The objective
+function𝐹𝑐
+𝓁(10) depends on variable 𝐮through𝑆𝓁(8), where the
+feature maps 𝐴𝑘
+𝓁=𝑓𝑘
+𝓁(𝐱)are fixed. Then, (10) involves masking and
+a forward pass through the network 𝑓, which is also fixed.
+Fig. 1 is an abstract illustration of our method, called Opti-CAM,
+without details like upsampling and normalization (10). Optimization
+takes place along the highlighted path from variable 𝐮to objective
+function𝐹𝑐
+𝓁. The saliency map is real-valued and the entire objective
+function is differentiable in 𝐮. We use Adam optimizer (Kingma and Ba,
+2015) to solve the optimization problem (9).Discussion. By maximizing (10), the saliency map focuses on the re-
+gions contributing to class 𝑐, while masked regions contribute less. This
+way, the influence of background in the average pooling process is
+reduced.
+The saliency map is expressed as a linear combination of fea-
+ture maps (8), with normalized weights. Hence, the saliency map is
+discouraged from taking up the entire image, both by the softmax
+competition (8) and by the fact that feature maps only respond to
+particular locations.
+In case𝑔𝑐(𝐲)∶=𝑦𝑐, (11) takes the form of direct masking (7) with
+𝑅(𝐦) =𝟎and
+∶={𝑆𝓁(𝐱;𝐮) ∶𝐮∈R𝐾𝓁}. (12)
+This constraint makes ours a CAM-based method. It dispenses the need
+for regularizers, because we only optimize one vector over the feature
+dimensions (up to 2048 for ResNet50), which is small compared with
+the dimensions of input images (50k for ImageNet). In addition, it
+does not complicate the optimization process in any way. It is only a
+different parametrization.
+4. Average Gain ( 𝐀𝐆)
+Average drop ( AD) and average increase ( AI) (Chattopadhay et al.,
+2018) are well-established classification metrics. They measure the
+effect on the predicted class probabilities by masking the input image
+with the saliency map. Let 𝑝𝑐
+𝑖and𝑜𝑐
+𝑖be the predicted probability for
+class𝑐given as input the 𝑖th test image 𝐱𝑖and its masked version
+respectively. Masking refers to element-wise multiplication with the
+saliency map, which is at the same resolution as the original image
+with values in [0,1]. Let𝑁be the number of test images. Class 𝑐is
+taken as the ground truth.
+Average drop (AD) quantifies how much predictive power, measured
+as class probability, is lost when we only mask the image; lower is
+better:
+AD(%)∶=1
+𝑁𝑁∑
+𝑖=1[𝑝𝑐
+𝑖−𝑜𝑐
+𝑖]
++
+𝑝𝑐
+𝑖⋅100. (13)
+Average increase (AI), also known as increase in confidence , measures
+the percentage of images where the masked image yields a higher class
+probability than the original; higher is better:
+AI(%)∶=1
+𝑁𝑁∑
+𝑖1𝑝𝑐
+𝑖<𝑜𝑐
+𝑖⋅100. (14)
+ADand AIare not defined in a symmetric way. ADmeasures
+changes in class probability whereas AImeasures a percentage of im-
+ages. It is possible that the percentage is high while the actual increase
+is small. Hence, it is possible that an attribution method improves both.
+Indeed, Poppi et al. (2021) observes that a trivial method called Fake-
+CAM outperforms state-of-the-art methods, including Score-CAM, by a
+large margin. Fake-CAM simply defines a saliency map where the top-
+left pixel is set to zero and is uniform elsewhere. This questions the
+purpose of ADandAI.
+Although the authors of Poppi et al. (2021) make this impressive
+observation, they use it to motivate the definition of a number of
+metrics that are orthogonal to the task at hand, i.e.measuring the effect
+of masking to the classifier. By contrast, we address the problem by
+introducing a new metric to be paired with ADas a replacement of AI.
+We define the new metric as follows.
+Average gain (AG) quantifies how much predictive power, measured
+as class probability, is gained when we mask the image; higher is better:
+AG(%)∶=1
+𝑁𝑁∑
+𝑖=1[𝑜𝑐
+𝑖−𝑝𝑐
+𝑖]
++
+1 −𝑝𝑐
+𝑖⋅100. (15)
+This definition is symmetric to the definition of average drop, in the
+sense that in absolute value, the numerator in the sum of AD,AGis the
+4
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+Table 1
+Classification metrics on ImageNet validation set, using CNNs. AD/AI: average drop/increase (Chattopadhay et al., 2018); AG:
+average gain (ours); ↓/↑: lower/higher is better; T: Average time (sec) per batch of 8 images. Bold: best, excluding Fake-CAM.
+Method ResNet50 VGG16
+AD ↓ AG ↑ AI↑ T AD ↓ AG ↑ AI↑ T
+Fake-CAM (Poppi et al., 2021) 0.8 1.6 46.0 0.00 0.5 0.6 42.6 0.00
+Grad-CAM (Selvaraju et al., 2017) 12.2 17.6 44.4 0.03 14.2 14.7 40.6 0.02
+Grad-CAM++ (Chattopadhay et al., 2018) 12.9 16.0 42.1 0.03 17.1 10.2 33.4 0.02
+Score-CAM (Wang et al., 2020) 8.6 26.6 56.7 15.22 13.5 15.6 41.7 3.11
+Ablation-CAM (desai and Ramaswamy, 2020) 12.5 16.4 42.8 18.26 15.5 12.6 36.9 2.98
+XGrad-CAM (Fu et al., 2020) 12.2 17.6 44.4 0.03 13.8 14.8 41.2 0.02
+Layer-CAM (Jiang et al., 2021) 15.6 15.0 38.8 0.08 48.9 3.1 13.5 0.07
+ExPerturbation (Fong et al., 2019) 38.1 9.5 22.5 152.96 43.0 7.1 20.5 83.20
+HiRes-CAM (Draelos and Carin, 2020) 12.2 17.6 44.4 0.03 15.8 13.2 37.8 0.02
+LIME (Ribeiro et al., 2016) 66.7 3.1 10.2 0.63 62.7 2.9 11.1 0.67
+GradientShap (Lundberg and Lee, 2017) 96.8 0.1 1.3 0.87 94.0 0.1 2.9 0.60
+Opti-CAM (ours) 1.5 68.8 92.8 4.15 1.3 71.2 92.7 3.94
+positive and negative part of 𝑝𝑐
+𝑖−𝑜𝑐
+𝑖respectively and the denominator
+is the maximum value that the numerator can get as a function of 𝑜𝑐
+𝑖,
+given that 0<𝑜𝑐
+𝑖<𝑝𝑐
+𝑖and𝑝𝑐
+𝑖<𝑜𝑐
+𝑖<1respectively. The two metrics thus
+compete each other, in the sense that changing 𝑜𝑐
+𝑖to improve one leaves
+the other unchanged or harms it. As we shall see, an extreme example
+is Fake-CAM, which yields near-perfect ADbut fails completely on AG.
+5. Experiments
+We evaluate Opti-CAM and compare it quantitatively and qualita-
+tively against other state-of-the-art methods on a number of datasets
+and networks. We report classification metrics with execution times and
+we provide visualizations, an ablation study and a study on the suitabil-
+ity of localization ground truth. A sanity check, additional classification
+results, localization metrics, more ablations, more visualizations and
+code are given in supplementary material.
+5.1. Datasets and networks
+ImageNet. We use the validation set of ImageNet ILSVRC 2012
+(Krizhevsky et al., 2012; Russakovsky et al., 2015), which contains
+50,000 images evenly distributed over the 1000 categories. For the
+ablation study and for timing, we sample 1000 images from this set.
+Concerning the localization experiments, bounding boxes from the
+localization task of ILSVRC1are used on the same validation set.
+Medical data. We use two medical image datasets, namely Chest X-
+ray(Kermany et al., 2018) and Kvasir (Pogorelov et al., 2017). Com-
+plete qualitative and quantitative results are given in the supplemen-
+tary. Here we only provide visualizations.
+Networks. For all datasets, we use the pretrained ResNet50 (He et al.,
+2016) and VGG16 (Simonyan and Zisserman, 2015) networks with
+batch normalization (Ioffe and Szegedy, 2015) from the Pytorch model
+zoo.2For ImageNet, we further use the pretrained ViT-B (16-224)
+(Dosovitskiy et al., 2020) and DeiT-B (16-224) (Touvron et al., 2021)
+from Pytorch image models (timm)3. We setℎas the identify mapping.
+For ResNet50 and VGG16, all the values of 𝑆𝓁(𝐱;𝐮)are non-negative
+due to ReLU. For ViT-B and DeiT-B, there are negative values. In either
+case,𝑆𝓁is subsequently normalized to [0,1]. On medical datasets, we
+fine-tune the networks as discussed in the supplementary material,
+where we also provide the setting details.
+1https://www.image-net.org/challenges/LSVRC/2012/index.php
+2https://pytorch.org/vision/0.8/models.html
+3https://github.com/rwightman/pytorch-image-models5.2. Evaluation
+Metrics. We use average drop (AD) and average increase (AI)
+(Chattopadhay et al., 2018) metrics, as well as the proposed average
+gain(AG), to measure the effect on classification performance of mask-
+ing the input image by a saliency map. In the supplementary, we also
+report insertion (I) and deletion (D) (Petsiuk et al., 2018) and highlight
+their limitations. Using classification metrics, we show the limitations
+of using the localization ground truth for the evaluation of attribution
+methods. In the supplementary, we provide a number of localization
+metrics from the weakly-supervised object localization (WSOL) task of
+ILSVRC2014.4
+Methods. We compare against the following state-of-the-art methods:
+Grad-CAM (Selvaraju et al., 2017), Grad-CAM++ (Chattopadhay et al.,
+2018), Score-CAM (Wang et al., 2020), Ablation-CAM (desai and Ra-
+maswamy, 2020), XGrad-CAM (Fu et al., 2020), Layer-CAM (Jiang
+et al., 2021), ExtremalPerturbation (Fong et al., 2019), HiRes-CAM
+(Draelos and Carin, 2020), LIME (Ribeiro et al., 2016) and Gradi-
+entSHAP (Lundberg and Lee, 2017). Implementations are obtained from
+the PyTorch CAM library5or TorchRay.6We use the official code of
+LIME.7and the package Captum8For transformer models, we also
+compare against raw attention (Dosovitskiy et al., 2020), rollout (Abnar
+and Zuidema, 2020) and TIBAV (Chefer et al., 2021).9
+Image normalization. It is standard that images are normalized before
+feeding them to a network. By doing so however, we cannot reproduce
+the results published for the baseline methods; rather, all results are
+improved dramatically. We can obtain results similar to published ones
+bynotnormalizing. We believe normalization is important and we
+include it in all our experiments. In the supplementary, we provide
+more details and results without normalization, as well as code that
+allows for reproduction and verification of our results.
+5.3. Image classification
+Opti-CAM is evaluated quantitatively using classification metrics
+and qualitatively by visualizing saliency maps.
+5.3.1. AD/AI/AG
+CNN. Table 1 shows ImageNet classification metrics using VGG16 and
+ResNet50 . Our Opti-CAM brings impressive performance in terms of
+average drop ( AD) and Average Increase ( AI) metrics. That is, not only
+4https://www.image-net.org/challenges/LSVRC/2014/index#
+5https://github.com/jacobgil/pytorch-grad-cam
+6https://github.com/facebookresearch/TorchRay
+7https://github.com/marcotcr/lime/tree/master
+8https://github.com/pytorch/captum/tree/master
+9https://github.com/hila-chefer/Transformer-Explainability
+5
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+Table 2
+Classification metrics on ImageNet validation set, using transformers. AD/AI: average drop/increase (Chattopadhay et al.,
+2018); AG: average gain (ours); ↓/↑: lower/higher is better. T: Average time (sec) per batch of 8 images. Bold: best, excluding
+Fake-CAM.
+Method ViT-B DeiT-B
+AD ↓ AG ↑ AI↑ T AD ↓ AG ↑ AI↑ T
+Fake-CAM (Poppi et al., 2021) 0.3 0.4 48.3 0.00 0.6 0.3 44.6 0.00
+Grad-CAM (Selvaraju et al., 2017) 69.4 2.5 12.4 0.14 33.5 1.7 12.5 0.11
+Grad-CAM++ (Chattopadhay et al., 2018) 86.3 1.5 1.0 0.15 50.7 0.9 7.2 0.13
+Score-CAM (Wang et al., 2020) 32.0 6.2 33.0 23.69 53.6 2.2 12.2 22.47
+XGrad-CAM (Fu et al., 2020) 88.1 0.4 4.3 0.13 80.5 0.3 4.1 0.12
+Layer-CAM (Jiang et al., 2021) 82.0 0.2 2.9 0.24 88.9 0.4 2.6 0.24
+ExPerturbation (Fong et al., 2019) 28.8 6.2 24.4 133.52 60.9 2.0 8.5 129.12
+RawAtt (Dosovitskiy et al., 2020) 92.6 0.2 2.8 0.02 95.3 0.0 1.8 0.02
+Rollout (Abnar and Zuidema, 2020) 42.1 5.6 20.9 0.02 55.2 0.8 7.9 0.02
+TIBAV (Chefer et al., 2021) 81.7 0.8 5.8 0.16 62.3 0.7 7.1 0.16
+HiRes-CAM (Draelos and Carin, 2020) 98.4 0.0 0.7 0.03 97.2 0.0 1.2 0.03
+LIME (Ribeiro et al., 2016) 71.5 1.7 7.1 0.43 55.6 1.7 9.7 0.42
+GradientShap (Lundberg and Lee, 2017) 98.1 0.0 0.8 1.36 95.8 0.1 1.5 0.71
+Opti-CAM (ours) 0.6 18.0 90.1 16.05 0.9 26.0 83.5 15.17
+impressive improvement over baselines, but near-perfect: near-zero AD
+and above 90% AI. Our new metric AGis lower, around 70% for
+Opti-CAM, but this is still several times higher than for all the other
+methods.
+Interestingly, Fake-CAM (Poppi et al., 2021) is the winner in terms
+ofADand second or third best in AIafter Opti-CAM and Score-CAM,
+but fails completely AG. This is expected and makes Fake-CAM unin-
+teresting as it should be: By only masking one pixel, the classification
+score can hardly drop (0.8% on ResNet50) and while it increases very
+often (on 46% of images), the gain is as little as the drop (0.7%). This
+makes the pair ( AD,AG) sufficient as primary metrics and AIcan be
+thought of as secondary, if important at all.
+Due to computation limits, LIME fails because the superpixels are
+too coarse compared to other methods. We choose GradientSHAP as
+a representative of SHAP methods, which is more suitable for high-
+resolution images. Nonetheless, GradientSHAP treats individual pix-
+els as the basic unit, which does not yield satisfactory results for
+classification metrics, namely AI/AG/AD/I/D.
+Table 1 also includes average execution time per image over the
+1000-image ImageNet subset for all methods. Opti-CAM is slower than
+gradient-based methods that require only one pass through the net-
+work, but on par or faster than gradient-free methods. Indeed, we
+use a maximum of 100 iterations with one forward/backward pass
+per iteration, while Score-CAM and Ablation-CAM perform as many
+forward passes as channels. Hence they are much slower on ResNet50
+than VGG16. ExtremalPerturbation does not depend on the number of
+channels but is very slow by performing a complex optimization in the
+image space.
+Transformers. Table 2 shows ImageNet classification metrics using ViT
+and DeiT. Unlike CAM-based methods that rely on a class-specific linear
+combination of feature maps, raw attention (Dosovitskiy et al., 2020)
+and rollout (Abnar and Zuidema, 2020) use the attention map of the
+[CLS] token from the last attention block and from all blocks respec-
+tively. This attention map depends only on the particular image and
+not on the target class, hence it is not really comparable. TIBAV (Chefer
+et al., 2021) uses both instance-specific and class-specific information.
+Opti-CAM outperforms all other methods dramatically, reaching
+near-zero ADandAIabove 80 or 90%. According to our new AGmet-
+ric, Opti-CAM still works while all other methods fail, but AGis much
+more conservative than AI. On ViT-B for example, the classification
+score increases for 90.1% of the images by masking with Opti-CAM,
+but the gain is only 18.0% on average.
+Visualization. Fig. 2 illustrates saliency map examples from ImageNet,
+Chest X-ray and Kvasir datasets. Opti-CAM saliency map is in general
+more spread out. This better highlights full objects, multiple instances
+or background context, which may be taken into account by the model.On Chest X-ray, Opti-CAM and Score-CAM are the only methods that
+capture the chest, while all others focus on image corners. More ex-
+amples on datasets and networks as well as quantitative evaluation on
+medical data are given in the supplementary material.
+5.3.2. Insertion/deletion
+Definition. Insertion/Deletion (Petsiuk et al., 2018) are based on the
+probability 𝑝𝑐𝑝
+𝑖for the predicted class 𝑐𝑝as pixels are ‘‘inserted’’ or
+‘‘deleted’’ from image 𝐱𝑖, averaged over the number of pixels and over
+all images in the test set.
+Deletion measures the decrease in the probability of class 𝑐𝑝when
+removing pixels one by one in decreasing order of saliency, where
+removal is taken as setting the value to zero; lower is better.
+Insertion , by contrast, measures the increase in the probability of
+class𝑐𝑝when adding pixels, again by decreasing order of saliency. In
+this case, we begin with a version of the image that is distorted by
+Gaussian blur and then addition is taken as setting the value of the
+pixel according to the original image. Higher is better.
+Results. The experimental results are shown in Table 3 for CNNs and
+transformers. ExPerturbation (Fong et al., 2019) is expected to perform
+best in insertion because its optimization objective is very similar to
+this evaluation metric, using blurring for masked regions. However,
+ExPerturbation (Fong et al., 2019) only performs best on ResNet50.
+TIBAV (Chefer et al., 2021), which is designed for transformers, out-
+performs the other methods on DeiT and ViT. According to the results
+of Insertion/Deletion, Opti-CAM has low performance but there is no
+clear winner on either CNNs or transformers.
+To further understand the behavior of Opti-CAM, we investigate
+in Fig. 3 examples where Score-CAM succeeds (insertion score greater
+than 90and deletion score less than 10) and Opti-CAM fails (insertion
+score less than 70and deletion score greater than 15). Compared with
+Score-CAM, the saliency maps obtained by Opti-CAM are more spread
+out and highlight several parts of the object and background context.
+In most of the cases, Opti-CAM fails I/D because it not only finds the
+object but also attaches importance to the background.
+We argue that this is not a failure. As our localization experiment
+in Table 5 indicates, the background is useful in discriminating a class.
+Often, the network recognizes the background better than the object
+itself. For example, a gas pump is likely to be seen with a truck, and a
+hare is often seen on grass. Several parts of the object are highlighted
+by Opti-CAM for the worm fence, terrier dog, hare, and manhole cover.
+Finally, several instances of spaniel dog are found by Opti-CAM.
+Insertion/Deletion include 224 steps of binarization, with a set of
+224 pixels being inserted/deleted at each step. If these pixels are all
+inserted over a single small area, the effect on the classifier is more
+immediate than when sparsely inserting pixels over multiple areas. The
+6
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+Table 3
+I/D: insertion/deletion (Petsiuk et al., 2018) scores on ImageNet validation set; ↓/↑: lower/higher is better.
+Method ResNet50 VGG16 ViT-B DeiT-B
+I↑ D↓ I↑ D↓ I↑ D↓ I↑ D↓
+Fake-CAM (Poppi et al., 2021) 50.7 28.1 46.1 26.9 57.4 33.3 57.5 34.2
+Grad-CAM (Selvaraju et al., 2017) 66.3 14.7 64.1 11.6 62.9 19.8 61.8 17.5
+Grad-CAM++ (Chattopadhay et al., 2018) 66.0 14.7 62.9 12.2 56.7 29.3 60.5 21.9
+Score-CAM (Wang et al., 2020) 65.7 16.3 62.5 12.1 66.5 15.1 60.6 24.4
+XGrad-CAM (Fu et al., 2020) 66.3 14.7 64.1 11.7 55.6 26.5 55.2 31.1
+Layer-CAM (Jiang et al., 2021) 67.0 14.2 58.3 6.4 62.9 14.6 61.6 21.2
+ExPerturbation (Fong et al., 2019) 70.7 15.0 61.1 15.0 64.4 18.4 62.1 27.0
+Ablation-CAM (desai and Ramaswamy, 2020) 65.9 14.6 63.8 11.4 – – – –
+RawAtt (Dosovitskiy et al., 2020) – – – – 62.2 17.9 56.3 29.3
+Rollout (Abnar and Zuidema, 2020) – – – – 64.8 15.2 56.7 32.8
+TIBAV (Chefer et al., 2021) – – – – 66.1 14.1 63.7 16.3
+LIME (Ribeiro et al., 2016) 60.0 15.3 56.6 14.8 61.4 22.9 62.1 27.8
+GradientShap (Lundberg and Lee, 2017) 58.5 6.3 43.4 5.2 59.2 16.6 57.6 22.3
+Opti-CAM (ours) 62.0 19.7 59.2 11.0 60.5 22.0 59.2 22.8
+Fig. 2. Saliency maps obtained by different methods for ImageNet (top two rows), Chest X-ray (row 3) and Kvasir (row 4) with VGG. Ground truth class shown on the left of the
+input image.
+same observation holds for deletion. By contrast, Opti-CAM attempts to
+find regions that contribute to the classification as a whole. There is no
+guarantee that those regions are effective when used in isolation.
+5.3.3. More metrics
+In this section, we show additional metrics including AOPC (Samek
+et al., 2016), Max-Sensitivity (Yeh et al., 2019) and ADCC (Poppi et al.,
+2021).
+We use the code and suggested parameters of package Quantus10
+to measure AOPC and MS. In particular, patch size 14and number
+of evaluation regions 10for AOPC; lower bound 0.2 and number of
+samples 10for MS. For ADCC, we use the official code.11We evaluate
+these metrics on ImageNet validation set using ResNet50 and VGG16.
+The results are reported in Table 4. Since AOPC shares the same philos-
+ophy as I/D, it is not a surprise that Opti-CAM has poor performance
+on AOPC. Opti-CAM achieves the best performance on MS.
+10https://github.com/understandable-machine-intelligence-lab/Quantus
+11https://github.com/aimagelab/ADCC?fbclid=IwAR0YK_
+93lxp4pZQnt34SlA9aeNCLRX8m0u8yTZPxbTXi80qiyhTiqxWaQ7o
+Fig. 3. Failure examples of Opti-CAM regarding insertion/deletion.
+7
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+Table 4
+AOPC/MS/ADCC scores on ImageNet validation set; ↓/↑: lower/higher is better.
+Method ResNet50 VGG16
+𝐴𝑂𝑃𝐶 ↑𝑀𝑆 ↓𝐴𝐷𝐶𝐶 ↓𝐴𝑂𝑃𝐶 ↑𝑀𝑆 ↓𝐴𝐷𝐶𝐶 ↓
+Grad-CAM (Selvaraju et al., 2017) 11.7 1.05 74.3 13.1 1.10 73.7
+Grad-CAM++ (Chattopadhay et al., 2018) 11.6 1.04 73.6 11.6 1.09 74.6
+Score-CAM (Wang et al., 2020) 10.2 1.04 61.0 11.0 1.09 73.9
+XGrad-CAM (Fu et al., 2020) 11.9 1.05 74.3 13.1 1.10 73.9
+Ablation-CAM (desai and Ramaswamy, 2020) 11.1 1.04 71.5 12.5 1.10 75.5
+Layer-CAM (Jiang et al., 2021) 13.0 1.22 61.1 13.3 1.25 51.7
+ExPerturbation (Fong et al., 2019) 12.0 1.07 26.0 11.2 1.09 42.8
+Opti-CAM (ours) 6.3 1.03 65.5 8.9 1.06 70.0
+Table 5
+Bounding box study. Classification metrics on ImageNet validation set using VGG16. 𝐵: ground-truth box used by localization
+metrics;𝐼: entire image; 𝑆: saliency map. AD/AI: average drop/increase (Chattopadhay et al., 2018); AG: average gain (ours);
+↓/↑: lower/higher is better; bold: best, excluding Fake-CAM.
+Method AD ↓ AG ↑ AI↑
+𝑆 𝐵 ∩𝑆 𝑆 ⧵𝐵 𝑆 𝐵 ∩𝑆 𝑆 ⧵𝐵 𝑆 𝐵 ∩𝑆 𝑆 ⧵𝐵
+𝑆∶=𝐵 67.2 – – 2.3 – – 9.2 – –
+𝑆∶=𝐼⧵𝐵 44.0 – – 2.8 – – 16.3 – –
+Fake-CAM (Poppi et al., 2021) 0.5 67.2 44.1 0.7 2.3 2.8 42.0 9.2 18.9
+Grad-CAM (Selvaraju et al., 2017) 15.0 72.6 52.1 15.3 1.8 6.0 40.4 8.4 19.4
+Grad-CAM++ (Chattopadhay et al., 2018) 16.5 72.9 53.1 10.6 1.6 4.1 35.2 7.3 17.1
+Score-CAM (Wang et al., 2020) 12.5 71.5 50.5 16.1 2.2 6.3 42.5 8.6 20.8
+Ablation-CAM (desai and Ramaswamy, 2020) 15.1 72.8 52.1 13.5 1.7 5.6 39.9 7.8 19.0
+XGrad-CAM (Fu et al., 2020) 14.3 72.6 51.4 15.1 1.8 6.0 42.1 8.0 20.1
+Layer-CAM (Jiang et al., 2021) 49.2 84.2 74.4 2.7 0.4 1.2 12.7 4.4 7.3
+ExPerturbation (Fong et al., 2019) 43.8 81.6 71.0 7.1 1.4 3.2 18.9 5.6 11.1
+Opti-CAM (ours) 1.4 62.5 34.8 66.3 8.7 25.8 92.5 18.6 47.1
+5.4. Object localization
+Localization metrics are used to measure the precision of saliency
+maps relative to ground truth bounding boxes of the foreground object
+of interest. These metrics originate from weakly supervised localization
+(WSOL). However, the objectives of WSOL and explaining the decision
+of a DNN are not necessarily aligned, since context may play an
+important role in the decision (Shetty et al., 2019; Rao et al., 2022).
+To investigate the relative importance of the object and its context,
+we measure classification metrics when using the bounding box 𝐵itself
+as a saliency map as well as its complement 𝐼⧵𝐵, where𝐼is the image.
+We also evaluate the intersection 𝐵∩𝑆of the saliency map 𝑆with the
+bounding box and with its complement ( 𝑆⧵𝐵).
+As shown in Table 5, the ground truth region of the object is not
+the only one responsible for the network decision. For example, the
+bounding box fails both when used as a saliency map itself and when
+combined with any saliency map, by harming all classification metrics.
+Even the complement is more effective than the bounding box itself,
+either alone or when combined. These findings support the hypothesis
+that localization metrics based on the ground truth bounding box
+are not necessarily appropriate for evaluating explanations of network
+decisions. Classification metrics are clearly more appropriate in this
+sense.
+Nevertheless, we report localization metrics in the supplementary
+material. In summary, although its saliency maps are more spread out,
+Opti-CAM outperforms other methods on a number of metrics.
+5.5. Ablation study
+We perform an ablation study of different choices of the objective
+function (10) and normalization (4) of the saliency map. More choices
+of (10), layer 𝓁, number of iterations and learning rates, selector
+function𝑔𝑐and initialization of 𝐰are studied in the supplementary
+material.Normalization function. For normalization function 𝑛(10), we investi-
+gate three choices:
+range ∶𝑛(𝐴)∶=𝐴−min𝐴
+max𝐴−min𝐴(16)
+maximum ∶𝑛(𝐴)∶=𝐴
+max𝐴(17)
+sigmoid ∶𝑛(𝑎𝑖𝑗)∶=1
+1 +𝑒−𝑎𝑖𝑗, (18)
+where𝑎𝑖𝑗is element (𝑖,𝑗)of matrix𝐴. The default is (16), normalizing
+by the range of values in the saliency map, as in Score-CAM (4);
+while (17) normalizes by the maximum value and (18) by the sigmoid
+function element-wise.
+Objective function. We refer to the default definition of 𝐹𝑐
+𝓁(10) as Mask
+because it maximizes the logit for the masked image. We also consider
+an alternative definition of objective function 𝐹𝑐
+𝓁, which encourages the
+masked version to preserve the prediction of original image:
+𝐹𝑐
+𝓁(𝐱;𝐮)∶= −||𝑔𝑐(𝑓(𝐱)) −𝑔𝑐(𝑓(𝐱⊙𝑛(up(𝑆𝓁(𝐱;𝐮)))))||. (19)
+This function is named Diff as it minimizes the difference of logits
+between the masked and the original image.
+Results. Table 6 shows classification metrics for the different choices
+of Opti-CAM, as well as comparison to other methods for reference, for
+the small subset of ImageNet validation set.
+We observe that the choice of normalization function has little effect
+overall and Sigmoid offers lower performance. Note that the minimum
+value of saliency maps is often zero or close to zero: Saliency maps are
+non-negative as convex combinations of non-negative feature maps (8).
+By contrast, the choice of loss function has more impact on performance
+and we observe that Mask (10) is superior on all cases.
+6. Discussion and conclusions
+Opti-CAM combines ideas of different saliency map generation
+methods, which are masking-based and CAM-based. Our method opti-
+mizes the saliency map at inference given a single input image. It does
+8
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+Table 6
+Ablation study using VGG16 on 1000 images of ImageNet validation set. AD/AI: average drop/increase (Chattopadhay et al., 2018); AG: average
+gain (ours); ↓/↑: lower/higher is better; bold: best, excluding Fake-CAM.
+Method 𝐹𝑐
+𝓁𝑛 AD ↓ AG ↑ AI↑
+Fake-CAM (Poppi et al., 2021) 0.5 0.7 42.1
+Grad-CAM (Selvaraju et al., 2017) 15.0 15.3 40.4
+Grad-CAM++ (Chattopadhay et al., 2018) 16.5 10.6 35.2
+Score-CAM (Wang et al., 2020) 12.5 16.1 42.6
+Ablation-CAM (desai and Ramaswamy, 2020) 15.1 13.5 39.9
+XGrad-CAM (Fu et al., 2020) 14.3 15.1 42.1
+Layer-CAM (Jiang et al., 2021) 49.2 2.7 12.7
+ExPerturbation (Fong et al., 2019) 43.8 7.1 18.9
+Opti-CAM (ours)Mask (10) Range (16) 1.4 66.3 92.5
+Diff (19) Range (16) 7.1 18.5 54.9
+Opti-CAM (ours)Mask (10) Max (17) 1.6 66.2 90.3
+Diff (19) Max (17) 6.8 17.8 54.5
+Opti-CAM (ours)Mask (10) Sigmoid (18) 5.0 18.3 57.5
+Diff (19) Sigmoid (18) 6.5 10.0 45.3
+not require any additional data or training any other network, which
+would need interpretation too.
+While Opti-CAM crafts a saliency map in the image space, it does not
+need any regularization. This is because the saliency map is expressed
+as a convex combination of feature maps and we only optimize one
+vector over the feature dimensions. The underlying assumption is that
+of all CAM-based methods: feature maps contain activations at all
+regions that are of interest for the classes that are present. Opti-CAM
+is more expensive than non-iterative gradient-based methods but as
+fast or faster than gradient-free methods that require as many forward
+passes as channels.
+We find that Opti-CAM brings impressive performance improvement
+over the state of the art according to the most important classification
+metrics on several datasets. The saliency maps are more spread out
+compared with those of the competition, attending to larger parts of
+the object, multiple instances and background context, which may be
+helpful in classification.
+Our new classification metric AGaims to be paired ADas a re-
+placement of AIand resolves a long-standing problem in evaluating
+attribution methods, without further increasing the number of metrics.
+We provide strong evidence supporting that the use of ground-truth
+object bounding boxes for localization is not necessarily optimal in
+evaluating the quality of a saliency map, because the primary objective
+is to explain how a classifier works.
+CRediT authorship contribution statement
+Hanwei Zhang: Software, Methodology, Conceptualization. Felipe
+Torres: Writing – review & editing. Ronan Sicre: Supervision, Method-
+ology. Yannis Avrithis: Supervision, Methodology, Conceptualization.
+Stephane Ayache: Supervision, Methodology.
+Declaration of competing interest
+The authors declare the following financial interests/personal re-
+lationships which may be considered as potential competing inter-
+ests: Hanwei ZHANG reports financial support was provided by Aix-
+Marseille University. Hanwei Zhang, Ronan Sicre, Felipe Torres,
+Stephane Ayache reports a relationship with Aix-Marseille University
+that includes: employment and travel reimbursement. This publicaton
+has received funding from the Excellence Initative of Aix-Marseille
+Universite - A*Midex, a French ‘‘Investssements d’Avenir programme’’
+(AMX-21-IET-017), and the UnLIR ANR project (ANR-19-CE23-0009).
+Part of this work was performed using HPC resources from GENCI-
+IDRIS (Grant 2020-AD011013110). Computer Vision and Image Un-
+derstanding If there are other authors, they declare that they have
+no known competing financial interests or personal relationships that
+could have appeared to influence the work reported in this paper.Data availability
+We use public dataset for our experiments.
+Acknowledgments
+This publication has received funding from the Excellence Initia-
+tive of Aix-Marseille Universite - A*Midex, a French ‘‘Investissements
+d’Avenir programme’’ (AMX-21-IET-017), and the UnLIR ANR project
+(ANR-19-CE23-0009). Part of this work was performed using HPC
+resources from GENCI-IDRIS (Grant 2020-AD011013110).
+Appendices
+Implementation details are provided in Appendix A. In Appendix B,
+we define localization metrics and provide corresponding results. We
+provide results on saliency maps of other classes in Appendix C and
+subjective evaluation in Appendix D. We provide results on medical
+data in Appendix E. We then provide more ablation results in Ap-
+pendix F, sanity check in Appendix G, and results without input image
+normalization in Appendix H.
+Appendix A. Implementation details
+All input images are resized to 224 ×224 ×3. To optimize the
+saliency map with Opti-CAM (9), we use the Adam (Kingma and Ba,
+2015) optimizer with learning rate 0.1 by default, setting the maximum
+number of iterations to 100and stopping early when the change in loss
+is less than 10−10. For VGG16, we generate the saliency map (8) from
+the feature maps of the last convolutional layer before max pooling
+by default, i.e.convolutional layer 3 of block 5. For ResNet50, we
+choose the last convolutional layer by default, i.e.convolutional layer
+3 of bottleneck 2 of block 4. For ViT and DeiT, we choose the last
+self-attention block by default, i.e.layer normalization of self-attention
+block 12. Ablations concerning the layer 𝓁and the convergence of
+Opti-CAM are included in Appendix F.
+Appendix B. Localization metrics
+Several works measure the localization ability of saliency maps,
+using metrics from the weakly-supervised object localization (WSOL) task.
+While we show in the main paper that localization of the object and
+classifier interpretability are not well aligned as tasks, we still provide
+localization results here. We use the official metric (OM), localization
+error (LE), pixel-wise𝐹1score,box accuracy (BoxAcc) (Choe et al., 2020),
+standard pointing game (SP) (Zhang et al., 2018), energy pointing game
+(EP) (Wang et al., 2020) and saliency metric (SM) (Dabkowski and Gal,
+9
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+2017) on the ILSVRC201412dataset. The goal of these metrics is to
+compare the saliency maps with bounding boxes around the object of
+interest. For simplicity, we define these metrics for a single image; the
+reported results are averaged over all images of the test set.
+B.1. Definitions
+We are given the saliency map 𝑆𝑐obtained from test image 𝐱for
+ground truth class 𝑐. We denote by 𝑆𝑐
+𝐩its value at pixel 𝐩. We binarize
+the saliency map by thresholding at its average value and we take the
+bounding box of the largest connected component of the resulting mask
+as the predicted bounding box 𝐵𝑝, represented as a set of pixels. We
+compare this box against the set of ground truth bounding boxes ,
+which typically contains 1 or 2 boxes of the same class 𝑐, or with their
+union𝑈= ∪, again represented as a set of pixels. We also compare
+the predicted class label 𝑐𝑝with the ground truth label 𝑐. All metrics
+take values in [0,1]and are expressed as percentages, except SM (B.7),
+which is unbounded.
+Official metric (OM). measures the maximum overlap of the predicted
+bounding box with any ground truth bounding box, requiring that the
+predicted class label is correct:
+OM ∶=1 −(
+max
+𝐵∈IoU(𝐵,𝐵𝑝))
+1𝑐𝑝=𝑐, (B.1)
+where IoUis intersection over union.
+Localization error (LE). is similar but ignores the predicted class label:
+LE ∶=1 − max
+𝐵∈IoU(𝐵,𝐵𝑝). (B.2)
+Pixel-wise𝐹1score (F1). is defined as 𝐹1= 2𝑃𝑅
+𝑃+𝑅, where precision𝑃is
+the fraction of mass of the saliency map that is within the ground truth
+union
+𝑃∶=∑
+𝐩∈𝑈𝑆𝑐
+𝐩∑
+𝐩𝑆𝑐
+𝐩(B.3)
+andrecall𝑅is the fraction of the ground truth union that is covered by
+the saliency map
+𝑅∶=∑
+𝐩∈𝑈𝑆𝑐
+𝐩
+|𝑈|. (B.4)
+Box Accuracy (BA) (Choe et al., 2020). Given threshold values 𝜂and
+𝛿, we find the bounding box 𝐵𝜂
+𝑝of the largest connected component of
+the binary mask{𝐩∶𝑆𝐩>𝜂}and require that it overlaps by 𝛿with at
+least one ground truth box:
+BoxAcc(𝜂,𝛿)∶= max
+𝐵∈1IoU(𝐵𝜂
+𝑝,𝐵)≥𝛿. (B.5)
+After averaging over the test images, we take the maximum of this
+measure over a set of values 𝜂and then the average over a set of values
+𝛿.
+Standard pointing game (SP) (Zhang et al., 2018). We find the pixel
+𝐩∗∶= arg max𝐩𝑆𝑐
+𝐩having the maximum saliency value and require that
+it lands in any of the ground truth bounding boxes:
+SP ∶= 1𝐩∗∈𝑈. (B.6)
+Energy pointing game (EP) (Wang et al., 2020). is equivalent to preci-
+sion (B.3).
+12https://www.image-net.org/challenges/LSVRC/2014/index#Saliency metric (SM) (Dabkowski and Gal, 2017). penalizes the size of
+the predicted bounding box 𝐵𝑝relative to the image and the cross-
+entropy loss:
+SM ∶= log max⎛
+⎜
+⎜⎝0.05,|||𝐵𝑝|||
+ℎ𝑤⎞
+⎟
+⎟⎠− log𝑝𝑐, (B.7)
+whereℎ×𝑤is the input image resolution and 𝑝𝑐is the predicted
+probability for ground truth class label 𝑐.
+B.2. Results
+We evaluate the localization ability of saliency maps obtained by
+our Opti-CAM and we compare with other attribution methods quan-
+titatively. Tables A.7 and A.8 report localization metrics on ImageNet.
+We observe different behavior in different metrics. In particular, Opti-
+CAM on ResNet and VGG performs best on OM and LE but poorly on the
+remaining metrics. On transformers, Opti-CAM performs best on OM,
+LE, F1, and SM.
+Metrics, where Opti-CAM does not perform well, are mostly the ones
+that penalize saliency maps that are more spread out. For example,
+SP and EP penalize saliency outside the ground truth bounding box
+of an object. This is not necessarily a weakness of Opti-CAM, because
+rather than weakly supervised object localization, the objective here is
+to explain how the classifier works.
+Appendix C. Saliency map of other class
+We generate saliency maps for the most probable, second most
+probable, and least probable classes across the entire dataset using our
+method and baseline methods such as Grad-CAM, Grad-CAM++, and
+Score-CAM. These saliency maps are evaluated using the metrics AG,
+AI, and AD relative to the ground truth. Additionally, we specifically
+present the results for the most probable classes only on misclassified
+images in the validation set.
+As shown in Table A.9, when replacing the ground truth with the
+predicted (most probable) class, the performance of all methods slightly
+drops. The results for the second most probable and the least probable
+class are even lower and similar with each other. In each case, the
+performance of Opti-CAM suffers more than the others. This result is
+positive for Opti-CAM because most examples are correctly classified so
+that the most probable class is the ground truth ( e.g.accuracy 76.1%)
+and Opti-CAM obtains a saliency map explaining the background (any
+class other than the ground truth); so when we mask the input image
+with this saliency map, the foreground is hidden and its performance
+should drop.
+For misclassified images, the performance of Opti-CAM suffers even
+more than the others. Again, this is positive for Opti-CAM because it
+obtains a saliency map explaining the background (again, different than
+the ground truth), so the performance for the foreground should drop
+for the same reason as above. This drop is even higher because the
+probability for the predicted class is higher than for the second or least
+probable class.
+Appendix D. Subjective evaluation
+As discussed in Section 2, the question is not how aligned a net-
+work is with human behavior, but to find how the network actually
+behaves. Nevertheless, for completeness, we perform one experiment
+as requested. In particular, we now conduct a small survey to explore
+the ability of humans to compare networks based on the saliency maps
+generated by Opti-CAM. We randomly select 20 correctly classified
+images from the validation set of ImageNet and generate corresponding
+saliency maps using Opti-CAM for both ResNet50 and VGG16. We then
+conceal information about the network and present the saliency maps
+along with original images to 38 participants, asking them to determine
+which network performed better, solely based on the saliency maps.
+10
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+Table A.7
+Localization metrics on ImageNet validation set. OM: official metric ; LE: localization error ; F1: pixel-wise𝐹1score; BA: box
+accuracy; SP: standard pointing game; EP: energy pointing game; SM: saliency metric .↓/↑: lower/higher is better. Bold: best,
+excluding Fake-CAM.
+Method OM ↓ LE↓ F1 ↑ BA ↑ SP ↑ EP ↑ SM↓
+ResNet50
+Fake-CAM (Poppi et al., 2021) 63.6 54.0 57.7 47.9 99.8 28.5 0.98
+Grad-CAM (Selvaraju et al., 2017) 72.9 65.8 49.8 56.2 69.8 33.3 1.30
+Grad-CAM++ (Chattopadhay et al., 2018) 73.1 66.1 50.4 56.2 69.9 33.1 1.29
+Score-CAM (Wang et al., 2020) 72.2 64.9 49.6 54.5 68.7 32.4 1.25
+Ablation-CAM (desai and Ramaswamy, 2020) 72.8 65.7 50.2 56.1 69.9 33.1 1.26
+XGrad-CAM (Fu et al., 2020) 72.9 65.8 49.8 56.2 69.8 33.3 1.30
+Layer-CAM (Jiang et al., 2021) 73.1 66.0 50.1 55.5 70.0 33.0 1.29
+ExPerturbation (Fong et al., 2019) 73.6 66.6 37.5 44.2 64.8 38.2 1.59
+Opti-CAM (ours) 72.2 64.8 47.3 49.2 59.4 30.5 1.34
+VGG16
+Fake-CAM (Poppi et al., 2021) 64.7 54.0 57.7 47.9 99.8 28.5 1.07
+Grad-CAM (Selvaraju et al., 2017) 71.1 62.3 42.0 54.2 64.8 32.0 1.39
+Grad-CAM++ (Chattopadhay et al., 2018) 70.8 61.9 44.3 55.2 66.2 32.3 1.38
+Score-CAM (Wang et al., 2020) 71.2 62.5 45.3 58.5 68.2 33.4 1.40
+Ablation-CAM (desai and Ramaswamy, 2020) 71.3 62.6 43.2 56.2 65.7 32.7 1.39
+XGrad-CAM (Fu et al., 2020) 70.8 62.0 41.9 53.5 64.4 31.6 1.41
+Layer-CAM (Jiang et al., 2021) 70.5 61.5 28.0 54.7 65.0 32.4 1.45
+ExPerturbation (Fong et al., 2019) 74.1 66.4 37.8 43.3 62.7 36.1 1.74
+Opti-CAM (ours) 69.1 59.9 44.1 51.2 61.4 30.7 1.34
+Table A.8
+Localization metrics with ViT and DeiT on ImageNet validation set. OM: official metric ; LE: localization error ; F1: pixel-wise
+𝐹1score; BA: box accuracy; SP: standard pointing game; EP: energy pointing game; SM: saliency metric .↓/↑: lower/higher is
+better. Bold: best, excluding Fake-CAM.
+Method OM ↓ LE ↓ F1 ↑ BA ↑ SP ↑ EP ↑ SM ↓
+ViT-B
+Fake-CAM (Poppi et al., 2021) 62.8 54.0 57.7 47.9 99.8 28.6 0.87
+Grad-CAM (Selvaraju et al., 2017) 79.6 74.3 29.4 45.0 58.1 31.0 3.27
+Grad-CAM++ (Chattopadhay et al., 2018) 84.2 80.6 14.8 23.8 51.4 27.3 4.15
+Score-CAM (Wang et al., 2020) 77.6 71.6 46.0 54.3 66.1 33.1 3.14
+XGrad-CAM (Fu et al., 2020) 82.0 76.9 19.6 41.3 52.8 28.5 3.31
+Layer-CAM (Jiang et al., 2021) 70.7 63.9 20.6 50.5 60.7 32.6 1.44
+ExPerturbation (Fong et al., 2019) 71.5 64.9 35.9 44.6 62.3 35.3 1.34
+RawAtt (Dosovitskiy et al., 2020) 72.4 64.8 18.5 50.4 55.4 31.6 1.68
+Rollout (Abnar and Zuidema, 2020) 67.6 58.8 36.9 50.7 57.8 30.0 1.16
+TIBAV (Chefer et al., 2021) 70.1 63.1 26.6 58.8 66.1 35.0 1.23
+Opti-CAM (ours) 64.4 54.6 54.5 48.0 58.2 28.7 0.98
+DeiT-B
+Fake-CAM (Poppi et al., 2021) 61.4 54.0 57.7 47.9 99.8 28.7 0.83
+Grad-CAM (Selvaraju et al., 2017) 65.5 60.3 44.3 47.2 62.8 30.2 1.20
+Grad-CAM++ (Chattopadhay et al., 2018) 70.6 67.2 34.3 43.6 57.7 30.3 2.14
+Score-CAM (Wang et al., 2020) 79.9 76.2 31.9 43.8 63.4 32.2 3.14
+XGrad-CAM (Fu et al., 2020) 82.0 78.4 19.5 44.1 53.4 28.8 3.03
+Layer-CAM (Jiang et al., 2021) 80.2 77.3 17.6 50.8 62.7 35.1 3.15
+ExPerturbation (Fong et al., 2019) 69.9 64.3 36.2 44.2 63.1 35.5 1.16
+RawAtt (Dosovitskiy et al., 2020) 73.5 68.2 5.9 48.1 46.5 27.3 1.91
+Rollout (Abnar and Zuidema, 2020) 63.9 57.0 27.8 47.9 36.5 27.2 0.94
+TIBAV (Chefer et al., 2021) 68.2 62.2 28.1 59.6 64.1 33.5 1.08
+Opti-CAM 62.3 55.1 53.9 48.0 55.1 28.8 0.84
+Table A.9
+Classification metrics on ImageNet validation set, using ResNet50. AD/AI: average drop/increase (Chattopadhay et al., 2018); AG: average gain (ours); ↓/↑: lower/higher is better;
+Ground Truth: ground truth class; Most: most probable class; Second: second probable class; Least: least probable class; Most (Mis.): most probable class on misclassifed images.
+MethodsGround Truth Most Second Least Most (Mis.)
+AD ↓ AG ↑ AI↑ AD ↓ AG ↑ AI↑ AD ↓ AG ↑ AI↑ AD ↓ AG ↑ AI↑ AD ↓ AG ↑ AI↑
+Grad-CAM (Selvaraju et al., 2017) 12.2 17.6 44.4 16.54 16.2 39.1 96.26 0.0 2.2 96.28 0.0 2.2 37.84 5.4 40.1
+Grad-CAM++ (Chattopadhay et al., 2018) 12.9 16.0 42.1 15.81 15.2 38.8 17.08 11.9 34.8 17.18 11.8 34.5 34.49 5.5 42.4
+Score-CAM (Wang et al., 2020) 8.6 26.6 56.7 10.07 26.9 52.3 26.16 8.4 23.3 28.29 7.4 22.1 36.82 5.1 38.8
+Opti-CAM 1.5 68.8 92.8 12.01 60.1 78.3 28.45 5.8 18.8 29.17 5.5 18.1 64.45 2.2 16.2
+11
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+Table A.10
+Classification metrics on Chest X-ray and KVASIR datasets. AD/AI: average drop/increase (Chattopadhay et al., 2018); AG:
+average gain (ours); ↓/↑: lower/higher is better; Bold: best, excluding Fake-CAM.
+Method ResNet50 VGG16
+AD ↓ AG ↑ AI↑ AD ↓ AG ↑ AI↑
+Chest X-ray
+Fake-CAM (Poppi et al., 2021) 0.1 0.9 49.7 0.1 0.4 29.8
+Grad-CAM (Selvaraju et al., 2017) 20.4 29.7 48.7 36.8 39.8 42.3
+Grad-CAM++ (Chattopadhay et al., 2018) 24.7 24.1 41.2 36.9 43.4 45.8
+Score-CAM (Wang et al., 2020) 21.6 27.7 44.2 35.3 47.4 48.9
+Ablation-CAM (desai and Ramaswamy, 2020) 26.2 27.9 42.9 36.9 46.9 47.8
+XGrad-CAM (Fu et al., 2020) 20.4 29.7 48.7 34.7 47.3 50.2
+Layer-CAM (Jiang et al., 2021) 24.5 23.4 39.1 36.6 45.9 47.6
+ExPerturbation (Fong et al., 2019) 21.4 5.5 17.9 29.7 21.8 28.7
+Opti-CAM (ours) 0.1 91.2 98.4 0.0 85.9 86.2
+Kvasir
+Fake-CAM (Poppi et al., 2021) 0.1 0.4 48.3 0.0 0.3 45.0
+Grad-CAM (Selvaraju et al., 2017) 10.0 23.2 39.8 33.8 6.3 14.6
+Grad-CAM++ (Chattopadhay et al., 2018) 11.2 18.7 32.9 20.7 9.3 20.4
+Score-CAM (Wang et al., 2020) 9.1 26.7 40.8 8.4 24.0 39.4
+Ablation-CAM (desai and Ramaswamy, 2020) 10.7 21.6 35.4 10.6 20.9 36.9
+XGrad-CAM (Fu et al., 2020) 10.0 23.2 39.8 12.1 21.6 35.2
+Layer-CAM (Jiang et al., 2021) 11.7 18.2 32.5 12.9 17.1 30.8
+ExPerturbation (Fong et al., 2019) 48.4 13.8 21.0 34.8 19.0 27.7
+Opti-CAM (ours) 0.2 91.1 99.0 0.0 93.5 98.1
+The results indicate that in 58.15% of cases, participants perceived
+VGG16 as more accurate than ResNet50. Upon querying the partic-
+ipants about their decision-making process, we find a preference for
+saliency maps containing larger regions of the object.
+Appendix E. Medical data
+Medical image recognition is a high-stakes task that crucially needs
+interpretable models. We thus evaluate our method on two standard
+medical image classification datasets.
+E.1. Datasets
+Chest X-ray. Kermany et al. (2018) aims at recognizing chest images
+of patients with pneumonia from healthy ones with 5216 training
+images, 16for validation and 624for testing. Images are resized to
+224 ×224 ×3 to adapt to the pretrained models.
+Kvasir. Pogorelov et al. (2017) contains 8classes and aims at rec-
+ognizing anatomical landmarks, pathological findings and endoscopic
+procedures inside the gastrointestinal tract. The 8000 images are split
+into 6000 images for training, 1000 for validation and 1000 for testing.
+Images are resized as for the other datasets
+E.2. Network fine-tuning
+To train our models on the medical data, we first train the last
+fully-connected layer according to the classes in each dataset, while
+keeping the backbone frozen. On Chest X-ray, we use learning rate 10−3
+for both networks. On Kvasir, we use learning rate 10−4for ResNet50
+and 5 × 10−3for VGG16. We then fine-tune the entire network with
+a learning rate 10−5for 50 epochs, using SGD with momentum 0.9
+for both networks on both datasets. On Chest X-ray data, we obtain
+accuracies of 83.2% for VGG16 and 82.0% for ResNet50; on Kvasir,
+89.5% for VGG16 and 89.8% for ResNet50.
+E.3. Results
+Table A.10 reports metrics AD/AG/AI and Table A.11 reports met-
+rics I/D on Chest X-ray and Kvasir using ResNet50 and VGG16 net-
+works. The conclusions remain the same as for ImageNet. Opti-CAM
+achieves an average performance on I/D and performs best D on VGG16of KVASIR. More than that, AD and AI are near perfect in most cases
+and AG is also extremely high. Additional visualizations are presented
+in supplementary material.
+Appendix F. More ablations
+F.1. Selectivity
+We investigate the effect of the selectivity of saliency maps on
+classification performance. In particular, before evaluation, we raise
+saliency maps element-wise to an exponent 𝛼that takes values in
+{0.01,0.05,0.1,0.5,1,1.5,2,3,5,10}. When𝛼is small, the saliency maps
+become more uniform, so that more information about the original
+image is revealed to the network. Respectively, when 𝛼is large, the
+saliency maps become more selective, so that the network sees fewer
+parts of the input. The order of pixels is maintained.
+Results in terms of AD,AG,AIare shown in Fig. A4, averaged over
+1000 ImageNet images. We observe that ADstays near zero for Opti-
+CAM for𝛼<2, while it increases linearly with 𝛼for the other methods.
+The AGand AIof Opti-CAM has a strong peak at 𝛼= 1,i.e.for the
+original saliency maps. The other methods are less sensitive and their
+AIperformance is not optimal at 𝛼= 1.
+F.2. Opti-CAM components
+Objective function. We consider more alternative definitions of the
+objective function 𝐹𝑐
+𝓁, taking into account not only the regions inside
+the saliency maps (In) but also their complement, outside (Out). In
+particular, relative to Mask, we define IOMask as
+𝐹𝑐
+𝓁(𝐱;𝐮)∶=𝑔𝑐(𝑓(𝐱⊙𝐬)) −𝑔𝑐(𝑓(𝐱⊙(1 −𝐬))), (F.1)
+where 𝐬∶=𝑛(up(𝑆𝓁(𝐱;𝐮)))for brevity. Similarly, relative to Diff, we
+define IODiff as
+𝐹𝑐
+𝓁(𝐱;𝐮)∶= −||𝑔𝑐(𝑓(𝐱)) −𝑔𝑐(𝑓(𝐱⊙𝐬))||
++||𝑔𝑐(𝑓(𝐱)) −𝑔𝑐(𝑓(𝐱⊙(1 −𝐬)))||.(F.2)
+According to Table A.12, IOMask performs great on AD and AI but
+worse on AG, while IODiff is worse on all metrics. Therefore, including
+the complementary of the saliency map is not beneficial.
+12
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+Table A.11
+I/D: insertion/deletion (Petsiuk et al., 2018) on Chest X-ray and KVASIR dataset using both ResNet50 and VGG16 .↓/↑:
+lower/higher is better.
+Method Chest X-ray Kvasir
+ResNet50 VGG16 ResNet50 VGG16
+I↑ D↓ I↑ D↓ I↑ D↓ I↑ D↓
+Grad-CAM (Selvaraju et al., 2017) 83.0 75.7 85.0 81.9 81.3 32.2 72.1 48.9
+Grad-CAM++ (Chattopadhay et al., 2018) 82.2 79.1 85.1 81.8 80.2 33.8 72.1 48.7
+Score-CAM (Wang et al., 2020) 82.9 77.0 87.6 79.0 80.6 33.4 79.3 34.9
+Ablation-CAM (desai and Ramaswamy, 2020) 83.5 75.1 92.0 73.1 80.3 32.6 79.4 36.2
+XGrad-CAM (Fu et al., 2020) 82.9 75.6 88.7 75.6 81.3 32.2 79.2 36.6
+Opti-CAM (ours) 82.0 78.4 86.8 79.5 80.2 37.7 77.0 24.8
+Table A.12
+Ablation study on objective function using VGG16 on 1000 images of ImageNet vali-
+dation set. Choices for objective function 𝐹𝑐
+𝓁: Mask: (10); Diff: (19); IOMask: (F.1);
+IODiff: (F.2). Choice for normalization function 𝑛: Range (16). Iterations: 50. AD/AI:
+average drop/increase (Chattopadhay et al., 2018); AG: average gain (ours); ↓/↑:
+lower/higher is better.
+Method 𝐹𝑐
+𝓁AD ↓AG ↑AI↑
+Fake-CAM (Poppi et al., 2021) 0.5 0.7 42.1
+Grad-CAM (Selvaraju et al., 2017) 15.0 15.3 40.4
+Grad-CAM++ (Chattopadhay et al., 2018) 16.5 10.6 35.2
+Score-CAM (Wang et al., 2020) 12.5 16.1 42.6
+Ablation-CAM (desai and Ramaswamy, 2020) 15.1 13.5 39.9
+XGrad-CAM (Fu et al., 2020) 14.3 15.1 42.1
+Layer-CAM (Jiang et al., 2021) 49.2 2.7 12.7
+ExPerturbation (Fong et al., 2019) 43.8 7.1 18.9
+Opti-CAMMask (10) 1.4 66.3 92.5
+Diff (19) 7.1 18.5 54.9
+IOMask (F.1) 0.2 5.5 99.7
+IODiff (F.2) 25.9 7.6 42.6
+Table A.13
+Layer ablation on 1,000 images from ImageNet validation set, using various layers of
+VGG16. The last convolutional layer before max pooling is chosen as our default layer
+(layer 42). AD/AI: average drop/increase (Chattopadhay et al., 2018); AG: average
+gain (ours); ↓/↑: lower/higher is better.
+Layer AD ↓ AG ↑ AI↑ Layer AD ↓ AG ↑ AI↑
+42 1.4 66.0 92.5 36 1.7 66.1 90.3
+32 2.8 61.3 81.6 29 1.6 78.0 93.9
+26 1.7 80.1 93.7 22 3.3 68.8 84.8
+19 2.9 67.3 84.9 16 2.3 72.4 89.1
+12 4.1 61.9 82.4 9 4.3 44.2 71.9
+6 13.5 23.5 50.2
+Layers. Table A.13 shows how the performance of Opti-CAM, in terms
+of AD/AI/AG, depends on the layer 𝓁of the VGG16 network used to
+compute the saliency map 𝑆𝑐
+𝓁(8). We can see that the layers 26, 29, and
+42 are all competitive. We choose the last convolutional layer (42) to be
+compatible with the other CAM methods (Zhou et al., 2016; Selvaraju
+et al., 2017; Chattopadhay et al., 2018; Wang et al., 2020).
+Convergence. Finally, Fig. A5 shows the classification performance of
+Opti-CAM vs.number of iterations for different learning rates. Optimal
+performance can be obtained at 100 iterations with learning rate 𝜂=
+0.1. We use these settings by default. We note that by using 50 iterations
+allows us to double the speed at the cost of a 6% drop of AGand very
+small drop of AIandAD.
+Appendix G. Sanity check
+We use the model parameter randomization test proposed by
+Adebayo et al. (2018b). This test compares the saliency maps generated
+by a trained model with the ones generated by a partially randomly
+initialized network of the same architecture. In particular, we choose 5
+layers of ResNet50 and we progressively replace them by random ones
+so that we have 6 different models with different amount of random
+Fig. A4. Effect of selectivity (raising element-wise to exponent 𝛼) of saliency maps on
+classification performance. AD/AI: average drop/increase (Chattopadhay et al., 2018);
+AG: average gain (ours); ↓/↑: lower/higher is better.
+Fig. A5. Classification metrics vs.number of iterations for different learning rates, us-
+ing VGG-16 on 1000 images of ImageNet. AD/AI: average drop/increase (Chattopadhay
+et al., 2018); AG: average gain (ours); ↓/↑: lower/higher is better.
+parameters. The saliency maps are generated for the small subset of
+ImageNet validation set, as in the ablation study.
+Following Adebayo et al. (2018b), we compute a number of sim-
+ilarity metrics between these saliency maps generated by the original
+13
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+Table A.14
+Classification metrics on ImageNet validation set, without input normalization. AD/AI: average drop/increase (Chattopadhay
+et al., 2018); AG: average gain (ours); ↓/↑: lower/higher is better. T: Average time (sec) per batch of 8 images. Bold: best,
+excluding Fake-CAM.
+Method ResNet50 VGG16
+AD ↓ AG ↑ AI↑ T AD ↓ AG ↑ AI↑ T
+Fake-CAM (Poppi et al., 2021) 0.9 0.7 47.4 0.00 0.5 0.3 47.7 0.00
+Grad-CAM (Selvaraju et al., 2017) 36.4 5.5 27.0 0.03 41.6 3.3 25.2 0.02
+Grad-CAM++ (Chattopadhay et al., 2018) 37.6 4.9 24.0 0.04 46.3 2.0 19.0 0.02
+Score-CAM (Wang et al., 2020) 28.8 8.8 33.6 20.47 39.3 3.5 24.6 3.08
+Ablation-CAM (desai and Ramaswamy, 2020) 36.6 5.1 25.6 18.49 41.8 2.9 24.0 2.95
+XGrad-CAM (Fu et al., 2020) 36.4 5.5 27.0 0.03 40.6 3.4 25.8 0.02
+Layer-CAM (Jiang et al., 2021) 42.6 4.2 19.2 0.02 82.1 0.3 6.9 0.01
+ExPerturbation (Fong et al., 2019) 51.2 6.9 26.1 15.67 50.1 4.4 24.5 9.10
+Opti-CAM (ours) 2.0 49.4 91.2 3.94 1.5 52.7 92.1 3.95
+Fig. A6. Sanity check of Opti-CAM on 1000 images of ImageNet validation set using
+ResNet50. Similarity between saliency maps by original and randomized network,
+where layers are progressively replaced by random ones.
+Fig. A7. Sanity check visualization of Opti-CAM on two images of ImageNet validation
+set using ResNet50. First column: Opti-CAM saliency maps for the original network;
+remaining columns: Opti-CAM saliency maps where layers are progressively replaced
+by random ones.
+and the randomized network, including Rank Correlation with/without
+absolute values, HOGs similarity, and SSIM. The results are shown in
+Fig. A6 (saliency map similarity measurements) and Fig. A7 (saliency
+map visualizations). Our method passes the sanity check, as it is very
+sensitive to changes in the model parameters. We also use model
+parameter randomization test and train a ResNet50 with randomly per-
+muted labels following the training recipes from the pytorch models.13
+The SSIM similarity is 0.013, which shows that Opti-CAM is sensitive
+to the relationship between instances and labels.
+Appendix H. Results without input normalization
+It is standard that images are normalized to zero mean and unit
+standard deviation before feeding them to a network, because this
+13https://github.com/pytorch/vision/tree/main/references/classificationis how networks are trained. For example, for ImageNet images, we
+subtract the mean vector [0.485,0.456,0.406] and divide channel-wise
+by standard deviation [0.229,0.224,0.225]. By doing so however, we
+cannot reproduce the results published for several baseline methods;
+rather, all results are improved dramatically. We can obtain results
+similar to published ones by notnormalizing, thus we speculate that
+authors of related work do not normalize images. This is also suggested
+by our attempts to communicate with the authors.
+We believe normalization is important and we include it in all our
+experiments. For reference and to allow for comparison with published
+results, we provide results without normalization in Table A.14 that
+correspond to Table 1. Finally, code is provided to allow for the
+reproduction and verification of our results.
+Appendix I. Supplementary data
+Supplementary material related to this article can be found online
+at https://doi.org/10.1016/j.cviu.2024.104101.
+References
+Abnar, S., Zuidema, W., 2020. Quantifying attention flow in transformers. arXiv preprint
+arXiv:2005.00928.
+Adebayo, J., Gilmer, J., Goodfellow, I.J., Kim, B., 2018a. Local explanation methods
+for deep neural networks lack sensitivity to parameter values. In: ICLR Workshop.
+Adebayo, J., Gilmer, J., Muelly, M., Goodfellow, I., Hardt, M., Kim, B., 2018b. Sanity
+checks for saliency maps. In: NIPS.
+Ahn, J., Cho, S., Kwak, S., 2019. Weakly supervised learning of instance segmentation
+with inter-pixel relations. In: CVPR.
+Bach, S., Binder, A., Montavon, G., Klauschen, F., Müller, K.-R., Samek, W., 2015. On
+pixel-wise explanations for non-linear classifier decisions by layer-wise relevance
+propagation. PLoS One.
+Baehrens, D., Schroeter, T., Harmeling, S., Kawanabe, M., Hansen, K., Müller, K., 2010.
+How to explain individual classification decisions. J. MLR.
+Bastings, J., Filippova, K., 2020. The elephant in the interpretability room: Why use
+attention as explanation when we have saliency methods? In: EMNLP Workshop.
+Bilen, H., Vedaldi, A., 2016. Weakly supervised deep detection networks. In: CVPR.
+Bodria, F., Giannotti, F., Guidotti, R., Naretto, F., Pedreschi, D., Rinzivillo, S., 2021.
+Benchmarking and survey of explanation methods for black box models. CoRR
+abs/2102.13076, arXiv:2102.13076.
+Chang, C., Creager, E., Goldenberg, A., Duvenaud, D., 2019. Explaining image classifiers
+by counterfactual generation. In: ICLR.
+Chattopadhay, A., Sarkar, A., Howlader, P., Balasubramanian, V.N., 2018. Grad-
+CAM++: Generalized gradient-based visual explanations for deep convolutional
+networks. In: WACV.
+Chefer, H., Gur, S., Wolf, L., 2021. Transformer interpretability beyond attention
+visualization. In: CVPR. pp. 782–791.
+Choe, J., Oh, S.J., Lee, S., Chun, S., Akata, Z., Shim, H., 2020. Evaluating weakly
+supervised object localization methods right. In: CVPR.
+Dabkowski, P., Gal, Y., 2017. Real time image saliency for black box classifiers. In:
+Guyon, I., Luxburg, U.V., Bengio, S., Wallach, H., Fergus, R., Vishwanathan, S.,
+Garnett, R. (Eds.), NIPS. Curran Associates, Inc.
+desai, s., Ramaswamy, H.G., 2020. Ablation-CAM: Visual explanations for deep
+convolutional network via gradient-free localization. In: WACV.
+14
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+Dosovitskiy, A., Beyer, L., Kolesnikov, A., Weissenborn, D., Zhai, X., Unterthiner, T.,
+Dehghani, M., Minderer, M., Heigold, G., Gelly, S., et al., 2020. An image is
+worth 16x16 words: Transformers for image recognition at scale. arXiv preprint
+arXiv:2010.11929.
+Draelos, R.L., Carin, L., 2020. Use HiResCAM instead of Grad-CAM for faithful
+explanations of convolutional neural networks. arXiv preprint arXiv:2011.08891.
+Elliott, A., Law, S., Russell, C., 2021. Explaining classifiers using adversarial
+perturbations on the perceptual ball. In: CVPR.
+Fong, R., Patrick, M., Vedaldi, A., 2019. Understanding deep networks via extremal
+perturbations and smooth masks. In: Proceedings of the IEEE/CVF International
+Conference on Computer Vision. pp. 2950–2958.
+Fong, R.C., Vedaldi, A., 2017. Interpretable explanations of black boxes by meaningful
+perturbation. In: ICCV.
+Fu, R., Hu, Q., Dong, X., Guo, Y., Gao, Y., Li, B., 2020. Axiom-based grad-CAM: Towards
+accurate visualization and explanation of CNNs. In: BMVC.
+Gomez, T., Fréour, T., Mouchère, H., 2022. Metrics for saliency map evaluation of deep
+learning explanation methods. In: International Conference on Pattern Recognition
+and Artificial Intelligence. Springer, pp. 84–95.
+Guidotti, R., Monreale, A., Ruggieri, S., Turini, F., Giannotti, F., Pedreschi, D., 2018.
+A survey of methods for explaining black box models. ACM Comput. Surv. 51 (5).
+He, M., Li, B., Sun, S., 2022. A survey of class activation mapping for the interpretabil-
+ity of convolution neural networks. In: International Conference on Signal and
+Information Processing, Networking and Computers. Springer, pp. 399–407.
+He, K., Zhang, X., Ren, S., Sun, J., 2016. Deep residual learning for image recognition.
+In: CVPR.
+Hedström, A., Weber, L., Krakowczyk, D., Bareeva, D., Motzkus, F., Samek, W.,
+Lapuschkin, S., Höhne, M.M.M., 2023. Quantus: An explainable AI toolkit for
+responsible evaluation of neural network explanations and beyond. J. Mach. Learn.
+Res. 24 (34), 1–11, URL http://jmlr.org/papers/v24/22-0142.html.
+Ioffe, S., Szegedy, C., 2015. Batch normalization: Accelerating deep network training
+by reducing internal covariate shift. In: ICML.
+Jalwana, M.A.A.K., Akhtar, N., Bennamoun, M., Mian, A., 2020. Attack to explain deep
+representation. In: CVPR.
+Jiang, P.-T., Zhang, C.-B., Hou, Q., Cheng, M.-M., Wei, Y., 2021. Layercam: Exploring
+hierarchical class activation maps for localization. IEEE Trans. Image Process. 30,
+5875–5888.
+Kermany, D., Zhang, K., Goldbaum, M., et al., 2018. Labeled Optical Coherence
+Tomography (Oct) and Chest X-ray Images for Classification. vol. 2, (no. 2),
+Mendeley data.
+Kingma, D.P., Ba, J., 2015. Adam: A method for stochastic optimization. In: Bengio, Y.,
+LeCun, Y. (Eds.), ICLR.
+Kolesnikov, A., Lampert, C.H., 2016. Seed, expand and constrain: Three principles for
+weakly-supervised image segmentation. In: ECCV.
+Krizhevsky, A., Sutskever, I., Hinton, G.E., 2012. ImageNet classification with
+deep convolutional neural networks. In: Pereira, F., Burges, C.J.C., Bottou, L.,
+Weinberger, K.Q. (Eds.), NIPS. Curran Associates, Inc.
+Li, X., Xiong, H., Li, X., Wu, X., Zhang, X., Liu, J., Bian, J., Dou, D., 2021. Interpretable
+deep learning: Interpretation, interpretability, trustworthiness, and beyond. arXiv
+preprint arXiv:2103.10689.
+Linardatos, P., Papastefanopoulos, V., Kotsiantis, S., 2020. Explainable AI: A review of
+machine learning interpretability methods. Entropy 23 (1), 18.
+Lipton, Z.C., 2018. The mythos of model interpretability: In machine learning, the
+concept of interpretability is both important and slippery. Queue 16 (3).
+Lundberg, S.M., Lee, S.-I., 2017. A unified approach to interpreting model predictions.
+In: Guyon, I., Luxburg, U.V., Bengio, S., Wallach, H., Fergus, R., Vishwanathan, S.,
+Garnett, R. (Eds.), NIPS.
+Montavon, G., Samek, W., Müller, K.-R., 2018. Methods for interpreting and
+understanding deep neural networks. Digit. Signal Process. 73, 1–15.
+Muhammad, M.B., Yeasin, M., 2020. Eigen-CAM: Class activation map using principal
+components. In: IJCNN.
+Petsiuk, V., Das, A., Saenko, K., 2018. RISE: Randomized input sampling for explanation
+of black-box models. In: BMVC.
+Phang, J., Park, J., Geras, K.J., 2020. Investigating and simplifying masking-based
+saliency methods for model interpretability. arXiv preprint arXiv:2010.09750.
+Pogorelov, K., Randel, K.R., Griwodz, C., Eskeland, S.L., de Lange, T., Johansen, D.,
+Spampinato, C., Dang-Nguyen, D.-T., Lux, M., Schmidt, P.T., et al., 2017. Kvasir:
+A multi-class image dataset for computer aided gastrointestinal disease detection.
+In: Multimedia Systems Conf.
+Poppi, S., Cornia, M., Baraldi, L., Cucchiara, R., 2021. Revisiting the evaluation of class
+activation mapping for explainability: A novel metric and experimental analysis.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 2299–2304.
+Rao, S., Böhle, M., Schiele, B., 2022. Towards better understanding attribution methods.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 10223–10232.
+Rebuffi, S.-A., Fong, R., Ji, X., Vedaldi, A., 2020. There and back again: Revisiting
+backpropagation saliency methods. In: CVPR.
+Ribeiro, M.T., Singh, S., Guestrin, C., 2016. ‘‘Why should I trust you?’’: Explaining the
+predictions of any classifier. In: SIGKDD. KDD ’16.Russakovsky, O., Deng, J., Su, H., Krause, J., Satheesh, S., Ma, S., Huang, Z.,
+Karpathy, A., Khosla, A., Bernstein, M., Berg, A.C., Fei-Fei, L., 2015. ImageNet
+large scale visual recognition challenge. IJCV 115 (3), 211–252.
+Samek, W., Binder, A., Montavon, G., Lapuschkin, S., Müller, K.-R., 2016. Evaluating
+the visualization of what a deep neural network has learned. IEEE Trans. Neural
+Netw. Learn. Syst. 28 (11), 2660–2673.
+Samek, W., Montavon, G., Lapuschkin, S., Anders, C.J., Müller, K.-R., 2021. Explaining
+deep neural networks and beyond: A review of methods and applications. Proc.
+IEEE 109 (3), 247–278.
+Schulz, K., Sixt, L., Tombari, F., Landgraf, T., 2020. Restricting the flow: Information
+bottlenecks for attribution. arXiv preprint arXiv:2001.00396.
+Selvaraju, R.R., Cogswell, M., Das, A., Vedantam, R., Parikh, D., Batra, D., 2017. Grad-
+cam: Visual explanations from deep networks via gradient-based localization. In:
+CVPR.
+Shetty, R., Schiele, B., Fritz, M., 2019. Not using the car to see the sidewalk–
+quantifying and controlling the effects of context in classification and segmentation.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 8218–8226.
+Shrikumar, A., Greenside, P., Kundaje, A., 2017. Learning important features through
+propagating activation differences. In: ICML.
+Simonyan, K., Vedaldi, A., Zisserman, A., 2014. Deep inside convolutional networks:
+Visualising image classification models and saliency maps. In: ICLR Workshop.
+Simonyan, K., Zisserman, A., 2015. Very deep convolutional networks for large-scale
+image recognition. In: ICLR.
+Smilkov, D., Thorat, N., Kim, B., Viégas, F.B., Wattenberg, M., 2017. SmoothGrad:
+removing noise by adding noise. CoRR abs/1706.03825, arXiv:1706.03825.
+Springenberg, J.T., Dosovitskiy, A., Brox, T., Riedmiller, M.A., 2015. Striving for
+simplicity: The all convolutional net. In: Bengio, Y., LeCun, Y. (Eds.), ICLR.
+Sundararajan, M., Taly, A., Yan, Q., 2017. Axiomatic attribution for deep networks. In:
+ICML.
+Szczepankiewicz, K., Popowicz, A., Charkiewicz, K., Nałęcz-Charkiewicz, K.,
+Szczepankiewicz, M., Lasota, S., Zawistowski, P., Radlak, K., 2023. Ground
+truth based comparison of saliency maps algorithms. Sci. Rep. 13 (1), 16887.
+Touvron, H., Cord, M., Douze, M., Massa, F., Sablayrolles, A., Jegou, H., 2021. Training
+data-efficient image transformers & distillation through attention. In: International
+Conference on Machine Learning, Vol. 139. pp. 10347–10357.
+Wang, H., Wang, Z., Du, M., Yang, F., Zhang, Z., Ding, S., Mardziel, P., Hu, X., 2020.
+Score-CAM: Score-weighted visual explanations for convolutional neural networks.
+In: CVPR Workshop.
+Yeh, C.-K., Hsieh, C.-Y., Suggala, A., Inouye, D.I., Ravikumar, P.K., 2019. On the (in)
+fidelity and sensitivity of explanations. Adv. Neural Inf. Process. Syst. 32.
+Yosinski, J., Clune, J., Nguyen, A.M., Fuchs, T.J., Lipson, H., 2015. Understanding
+neural networks through deep visualization. CoRR abs/1506.06579, arXiv:1506.
+06579.
+Zeiler, M.D., Fergus, R., 2014. Visualizing and understanding convolutional networks.
+In: ECCV.
+Zhang, J., Bargal, S.A., Lin, Z., Brandt, J., Shen, X., Sclaroff, S., 2018. Top-down neural
+attention by excitation backprop. Int. J. Comput. Vis. (IJCV) 126 (10), 1084–1102.
+Zhou, B., Khosla, A., Lapedriza, A., Oliva, A., Torralba, A., 2016. Learning deep features
+for discriminative localization. In: CVPR.
+Zolna, K., Geras, K.J., Cho, K., 2020. Classifier-agnostic saliency map extraction. CVIU
+196, 102969.
+Hanwei Zhang is a Post-doctoral researcher on the QARMA
+team at LIS Marseille, working on the interpretability of
+deep neural networks with Ronan Sicre, Stephane Ayache,
+and Yannis Avrithis. She defended her Ph.D. thesis on
+‘‘Deep Learning in Adversarial Context’’ in 2021, which
+focused on the security problem in machine learning and
+was supervised by Laurent Amsaleg, Yannis Avrithis, and
+Teddy Furon in the Linkmedia team at IRISA Rennes. Her
+current work primarily focuses on trustworthy AI, including
+interpretability and adversarial security of machine learning
+models.
+Felipe Torres is a Ph.D. student in Interpretable recognition
+at École Centrale Marseille, on the research team QARMA
+since October 2020, under supervision of Ronan Sicre,
+Stephane Ayache, and Yannis Avrithis. He is interested
+in Machine Learning and Computer Vision (CV), on new
+technologies or applications. From 2016 to 2020, he worked
+on Biomedical Images (namely bone age assessment) via
+classification/regression in the Biomedical Computer Vision
+Group at Universidad de los Andes, under the tutelage of
+professor Pablo Arbeláez.
+15
+
+---PAGE---
+
+H. Zhang, F. Torres, R. Sicre et al. Computer Vision and Image Understanding 248 (2024) 104101
+Ronan Sicre received a Master degree in Intelligent Systems
+from the University of Toulouse, France, in 2007. During his
+master he studied at the University of Plymouth, England,
+at the University of Calgary, Canada, and at the Technical
+University of Berlin, Germany. From 2008 to 2011, he
+worked toward the Ph.D. degree in the LaBRI at the
+University of Bordeaux in collaboration with MIRANE S.A.S.
+Then, he obtained a Lecturer / Researcher (ATER) position
+in Bordeaux: he taught at the ENSEIRB-MATMECA and
+worked as a researcher at the LaBRI. he then worked as
+a postdoc at the University of Amsterdam (UvA) at the
+Intelligent System Lab (ISLA), at the University of Caen, in
+the image team of the GREYC lab, and at INRIA Rennes in
+the Linkmedia Team. He is now Assistant professor at Ecole
+Centrale Marseille and belong to the QARMA team at LIS
+Yannis Avrithis Since 2022 Yannis Avrthis is a Prin-
+cipal Investigator at the Institute of Advanced Research
+on Artificial Intelligence (IARAI), carrying out research
+on computer vision and machine learning. Between 2021
+and 2022 he has been a Research Director at the In-
+formation Management Systems Institute (IMSI) of Athena
+Research Center. His recent work is focusing on differ-
+ent learning settings including metric learning, incremental
+learning, and few-shot learning; multimodal learning in-
+cluding vision, language, and 3D models; interpretability;and video question answering. Between 2016 and 2021 he
+has been a research scientist in the LinkMedia team of
+Inria Rennes-Bretagne Atlantique and he has been teaching
+Deep Learning for Vision at the University of Rennes 1.
+His work has focused on exploring the manifold struc-
+ture of data and, apart from image retrieval, using it for
+unsupervised, semi-supervised, and few-shot learning. He
+has also worked on adversarial examples and on inves-
+tigating the sparsity of convolutional activations, applied
+to spatial matching and unsupervised object discovery.
+In 2020, he was awarded the Habilitation à Diriger des
+Recherches (HDR) qualification from the University of
+Rennes 1.
+Stephane Ayache is assistant professor at Aix-Marseille Uni-
+versity since 2008. His research areas are machine learning
+and computer vision with a special interest on multimodal
+representations and representation understanding. He co-
+organized challenges and workshops at ECML, CVPR, NIPS
+and published more than 70 papers.
+16
