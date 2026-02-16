@@ -1,4 +1,4 @@
-# OptiCAM
+# Consistent OptiCAM
 
 ![opti](figures/Redrawn.png)
 ______
